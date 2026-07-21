@@ -89,6 +89,19 @@ contend heavily for this machine's single GPU and can make startup very
 slow. Close other Isaac Sim instances first if this one seems to hang during
 extension loading.
 
+Note: this machine has a real X server at `:0` (bridged via `x11vnc` +
+noVNC - the same one the interactive GUI screenshots in this project's
+history come from), but a plain non-interactive shell (e.g. an automated
+script/agent session, not a logged-in desktop session) doesn't have
+`DISPLAY` set. Running `conveyor_indexer.py` (which uses
+`SimulationApp({"headless": False})`) without `DISPLAY` set in such a shell
+makes the app exit cleanly after a few seconds with no error and no window
+- pass `DISPLAY=:0` explicitly. When running as a long-lived background
+process from a shell whose session may itself get torn down between
+commands, use `setsid nohup ... & disown` (plain `command &` alone was
+observed getting reaped between separate tool invocations in an automated
+session; `setsid`/`nohup`/`disown` together fully detach it).
+
 ## Known gaps / TODOs
 
 - ~~Zone order unconfirmed~~ **Resolved**: confirmed via world-space
@@ -262,14 +275,78 @@ extension loading.
   `pick_and_place.py`'s own process (never touches the shared Isaac Sim
   installation) rather than editing the vendored file.
 
-  Not yet re-validated in the running sim as of this migration:
-  `DOWN_ORIENTATION` in `pick_and_place.py` (the tool0 downward-facing
-  quaternion) was chosen as a reachable orientation (confirmed via
-  `robot_configs/smoke_test_ur20_rmpflow.py` converging without error) but
-  not visually confirmed to actually point straight down at the box -
-  tool0's orientation convention differs from the previous UR10 wrapper's
-  `end_effector_link` frame, so the old `get_downward_orientation()` value
-  could not be reused as-is. Confirm visually and adjust if needed.
+- **RMPflow convergence in the real scene is NOT yet fully working - the
+  arm reaches the right X/Y position above the box but stalls part-way
+  through descending, and orientation doesn't settle to straight-down.**
+  This is the main open item from this session. Confirmed facts, in the
+  order discovered (re-run `PYTHONPATH=/tmp/proto_gen
+  /home/ubuntu/IsaacSim/python.sh /home/ubuntu/conveyor_indexing/conveyor_indexer.py`
+  with `DISPLAY=:0` to keep debugging - see "Setup" for why `DISPLAY` needs
+  setting explicitly in a non-interactive shell on this machine):
+  - Fixed real bugs along the way, all still valid: `create_pedestal_and_robot()`'s
+    `robot.set_default_state(...)` was never actually taking effect -
+    `World.reset()` (`isaacsim.core.api`, the classic API) has no knowledge
+    of `isaacsim.core.experimental` prims and never called
+    `reset_to_default_state()` on our plain `Articulation` robot, confirmed
+    by reading `world.py`. The arm was silently starting from its raw
+    near-zero USD-authored pose every run regardless of
+    `UR20_DEFAULT_JOINT_POSITIONS`. Fixed by calling
+    `robot.reset_to_default_state()` explicitly right after `world.reset()`
+    in `conveyor_indexer.py`.
+  - `UR20_DEFAULT_JOINT_POSITIONS` is a real, verified-reachable "ready"
+    pose (tool0 pointing down, 0.5 m below the robot's own base) - derived
+    by literally running `RmpFlowController` to convergence against that
+    target in an empty, obstacle-free scene and reading back the converged
+    joint angles (see the constant's own comment in `pick_and_place.py`),
+    not hand-picked. `robot_configs/ur20/robot.xrdf`'s
+    `default_joint_positions` was updated to match (both must stay in
+    sync - see `generate_ur20_xrdf.py`'s `DEFAULT_JOINT_POSITIONS_RAD`).
+  - A **control test with RMPflow's obstacle tracking fully disabled**
+    (`_DEBUG_DISABLE_OBSTACLE_TRACKING`, left `False` in committed code)
+    converged to a WORSE final position (0.95 m from target) than with
+    obstacle tracking on (0.54 m) - this conclusively rules out
+    collision-avoidance repulsion as the cause of the stall, despite it
+    being the most obvious suspect (a first attempt at a synthetic capsule
+    obstacle proxy had earlier caused real problems - see below - which is
+    why it was suspected first).
+  - The actual fix that mattered: `rmp_flow.yaml`'s `target_rmp` (position)
+    vs `axis_target_rmp` (orientation) `accel_p_gain` were still at UR10's
+    original values (80 / 200 respectively - orientation weighted 2.5x
+    position). Rebalanced to 300 / 80 (position now dominant). This
+    produced a real, measurable improvement: X/Y position converged to
+    within ~3 cm of the pick target (previously off by 0.5-1 m).
+  - Z (descent) and full orientation convergence remain unresolved:
+    doubling the phase tick budgets (`PHASE_TICKS`) only bought ~6 cm of
+    further Z progress, and the tool's actual world Z-axis direction
+    (see the `_local_z_axis_in_world()` diagnostic helper and the
+    `tool_z_axis_world=` value logged in `DESCEND_TO_PICK`'s debug print)
+    swung noticeably between separate runs rather than settling toward the
+    intended `(0, 0, -1)` - more consistent with a genuine stall (a joint
+    limit or near-singularity, or a still-unresolved gain issue between the
+    Z-descent and orientation terms specifically) than with "just needs
+    more time." Not yet root-caused. Next steps worth trying: log per-joint
+    positions against `robot_configs/ur20/robot.urdf`'s `<limit>` values
+    during the stall to check whether a specific joint is pinned; check
+    whether the exact combination of the pick point's position and
+    `DOWN_ORIENTATION` is kinematically reachable at all for this
+    pedestal/`ROBOT_POSITION` (a manipulability/near-singularity check, not
+    just a reach-distance one); consider whether `target_rmp`/
+    `axis_target_rmp`'s `accel_d_gain` (damping, unchanged from UR10) also
+    needs rebalancing alongside the p_gain change already made.
+  - A **first attempt at obstacle-proxy geometry was wrong and reverted**:
+    synthetic capsules sized from each zone's bbox were created as
+    real PhysX colliders (`UsdPhysics.CollisionAPI` applied) to work around
+    the real belt geometry being untrackable by `WorldBinding` (see
+    `conveyor_indexer.py` git history) - this made them physically collide
+    with and shove the real boxes, and they were also grossly oversized
+    relative to the actual belt bboxes (root cause not diagnosed - possibly
+    a units/frame mismatch in the capsule `axes`/`radii`/`heights`
+    parameterization, worth checking before trying this approach again).
+    The current, working approach instead just excludes each track's
+    untrackable `.../Belt` sub-prim specifically (not the whole track),
+    leaving the real support-post structure mesh (a different, ordinary,
+    trackable Mesh - `SM_ConveyorBelt_A06_02`) correctly tracked and
+    avoided with no synthetic geometry at all.
 - **Single-box capacity per zone/queue depth untested beyond two boxes** -
   behavior with a longer queue of boxes on loop 1, or a busy loop 2, hasn't
   been exercised.

@@ -125,13 +125,15 @@ ROBOT_POSITION = (-3.0, 1.22, 0.0)  # (x, y, z-of-ground-contact)
 PEDESTAL_HEIGHT = 1.6
 PLACE_XY = (-3.0, 2.4)  # on ConveyorTrack_09's belt (un-shifted), safely inboard of its near edge (Y=2.195)
 
+CONVEYOR_TRACK_ROOTS = tuple(
+    f"/World/ConveyorTrack{suffix}"
+    for suffix in ["", "_01", "_02", "_03", "_04", "_05", "_06", "_07", "_08", "_09", "_10", "_11", "_12", "_13", "_14", "_15"]
+)
+
 # Any occupancy hit whose prim path falls under one of these roots is belt/
 # structure/robot geometry, not a transported item, and is excluded from
 # occupancy detection.
-EXCLUDED_STRUCTURE_ROOTS = tuple(
-    f"/World/ConveyorTrack{suffix}"
-    for suffix in ["", "_01", "_02", "_03", "_04", "_05", "_06", "_07", "_08", "_09", "_10", "_11", "_12", "_13", "_14", "_15"]
-) + (ROBOT_PATH, PEDESTAL_PATH)
+EXCLUDED_STRUCTURE_ROOTS = CONVEYOR_TRACK_ROOTS + (ROBOT_PATH, PEDESTAL_PATH)
 
 
 class ConveyorZone:
@@ -153,8 +155,8 @@ class ConveyorZone:
         bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
         world_bound = bbox_cache.ComputeWorldBound(self.belt_prim)
         aligned_range = world_bound.ComputeAlignedRange()
-        self._half_extent = [d * 0.5 for d in (aligned_range.GetSize())]
-        self._center = list(aligned_range.GetMidpoint())
+        self.bbox_half_extent = [d * 0.5 for d in (aligned_range.GetSize())]
+        self.bbox_center = list(aligned_range.GetMidpoint())
         # Belts are treated as axis-aligned and static; identity rotation.
         self._quat = carb.Float4(0.0, 0.0, 0.0, 1.0)
 
@@ -183,8 +185,8 @@ class ConveyorZone:
             return True
 
         get_physics_scene_query_interface().overlap_box(
-            carb.Float3(*self._half_extent),
-            carb.Float3(*self._center),
+            carb.Float3(*self.bbox_half_extent),
+            carb.Float3(*self.bbox_center),
             self._quat,
             report_hit,
         )
@@ -336,6 +338,36 @@ def _reposition_loop2(stage: Usd.Stage, delta_y: float) -> None:
     print(f"[conveyor_indexer] shifted loop 2 by dY={delta_y} (runtime only, not saved to USD)", flush=True)
 
 
+# Each ConveyorTrack authors TWO separate collision meshes, confirmed by
+# traversing the stage: `SM_ConveyorBelt_A06_02` (the frame/upright
+# posts/bolts, an ordinary static Mesh) and `Belt` (just the moving surface,
+# under an Xform with PhysxSurfaceVelocityAPI). Only the latter fails
+# cuMotion's RMPflow obstacle world (`WorldBinding.initialize()`, called from
+# pick_and_place.py's `_build_rmpflow_controller`) - confirmed two different
+# ways (non-unity-scaled ancestors on some tracks; the belt mesh isn't one of
+# the supported obstacle shape types at all on others), both pre-existing
+# `conveyor_setup.usd` authoring quirks, not something this scaffold edits
+# into the source scene.
+#
+# An early attempt here blanket-excluded ALL conveyor structure (both
+# meshes) to route around this - which meant the frame/upright posts were no
+# longer tracked either, and the arm was observed physically colliding with
+# them. `_build_rmpflow_controller`'s own retry loop already discovers and
+# excludes exactly the prims that fail (belt surfaces, occasional
+# non-unity-scaled ancestors) one at a time, so no exclusion list needs to be
+# passed from here at all - the frame/posts mesh, which never fails those
+# checks, stays tracked and avoided.
+#
+# A separate, even earlier attempt created synthetic capsule obstacles sized
+# from each zone's bbox as a substitute for the untrackable belt surface.
+# That was wrong in a more basic way than sizing, though: applying
+# UsdPhysics.CollisionAPI makes a prim a REAL PhysX collider, not just a
+# planning-time hint - the capsules physically collided with and shoved the
+# actual boxes on the belt (confirmed visually - grossly oversized red
+# capsules overlapping the real boxes/structure). There's no "obstacle hint,
+# not a real object" middle ground via this API.
+
+
 def main() -> None:
     # Open the target stage BEFORE constructing World: World() attaches to
     # whatever stage is open at construction time, and open_stage() after the
@@ -387,8 +419,19 @@ def main() -> None:
     print("[conveyor_indexer] robot ready, calling world.reset()", flush=True)
 
     world.reset()
+    # World.reset() (isaacsim.core.api, the classic API) has no knowledge of
+    # `isaacsim.core.experimental` prims like our plain `Articulation` robot -
+    # confirmed by reading world.py, it never calls reset_to_default_state()
+    # on them. So the dof_positions configured via set_default_state() in
+    # create_pedestal_and_robot() was silently never applied - the arm always
+    # started from its raw near-zero USD-authored pose regardless of what
+    # was configured, which was the real reason changing
+    # UR20_DEFAULT_JOINT_POSITIONS appeared to have no effect. Must be
+    # triggered explicitly.
+    robot.reset_to_default_state()
     check_pos, _ = robot.get_world_poses()
     print(f"[conveyor_indexer] DEBUG robot base pose AFTER world.reset(): {check_pos.numpy()}", flush=True)
+    print(f"[conveyor_indexer] DEBUG robot dof_positions AFTER reset_to_default_state(): {robot.get_dof_positions().numpy()}", flush=True)
     print("[conveyor_indexer] world.reset() done", flush=True)
 
     # MagicAttachPickPlace builds the cuMotion RmpFlowController + collision
