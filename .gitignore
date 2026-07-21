@@ -3,3 +3,7 @@ __pycache__/
 data/
 *.parquet
 .claude/settings.local.json
+
+# Regeneratable via robot_configs/generate_ur20_urdf.py - 64M of .obj/.mtl
+# exported straight from the bundled ur20.usd asset, not source we authored.
+robot_configs/ur20/meshes/

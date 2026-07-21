@@ -1,7 +1,7 @@
 """Standalone Isaac Sim script: zone-accumulation indexing over the inbuilt
 surface-velocity conveyors in ~/conveyor_setup.usd, with per-tick data
-logging for later imitation/RL training, plus a UR10 pick-and-place between
-the two conveyor loops.
+logging for later imitation/RL training, plus a UR20 pick-and-place (driven
+by NVIDIA cuMotion RMPflow) between the two conveyor loops.
 
 Run with Isaac Sim's bundled python, e.g.:
     ./python.sh /home/ubuntu/conveyor_indexing/conveyor_indexer.py
@@ -19,15 +19,6 @@ import sys
 from isaacsim import SimulationApp
 
 simulation_app = SimulationApp({"headless": False})
-
-import omni.kit.app
-
-# isaacsim.robot.experimental.manipulators.examples (UR10/Franka + friends) is
-# not enabled by default - must be turned on before importing from it (APIs
-# come from the extension/runtime plugin system, loaded lazily).
-omni.kit.app.get_app().get_extension_manager().set_extension_enabled_immediate(
-    "isaacsim.robot.experimental.manipulators.examples", True
-)
 
 import carb
 import omni.usd
@@ -108,26 +99,31 @@ KNOWN_BOX_PATHS = [
 ]
 
 # Loop 2 as originally authored sits with its near edge 1.75 m from loop 1's
-# (2.6 m centerline-to-centerline) - too far for a UR10 (~1.3 m reach) to
-# reliably bridge: a first pass at this (ROBOT_POSITION Y=1.22, PLACE_XY
+# (2.6 m centerline-to-centerline) - too far for a UR10 (~1.3 m spec reach)
+# to reliably bridge: a first pass at this (ROBOT_POSITION Y=1.22, PLACE_XY
 # Y=2.4, ~90% of spec reach each side) picked reliably but consistently
 # failed to reach the place point, dropping the box back onto loop 1 instead
 # (confirmed via 55s of logged data: the place zone never once registered
-# occupied while loop 1 cycled the same box perpetually). Loop 2 is
-# repositioned closer at runtime (LOOP2_Y_SHIFT, applied in main() before
-# World construction) rather than edited into conveyor_setup.usd, so the
-# authored scene file stays untouched.
-LOOP2_Y_SHIFT = -0.81  # applied to every ConveyorTrack_08.._15 prim's Y translate
+# occupied while loop 1 cycled the same box perpetually). That prompted
+# LOOP2_Y_SHIFT, a runtime-only repositioning of loop 2 closer to loop 1
+# (applied in main() before World construction, never edited into
+# conveyor_setup.usd) purely to fit within the UR10's tight reach.
+#
+# Swapping to a UR20 (1.75 m spec reach - see robot_configs/ur20/, generated
+# via cuMotion) removes the need for that workaround: reverting to the
+# ORIGINAL un-shifted loop 2 position and the same ROBOT_POSITION/PLACE_XY
+# values from the first (UR10-failed) attempt above puts pick and place each
+# ~1.18 m from the robot - about 67% of the UR20's reach, comfortable margin
+# below the ~90% that failed for the UR10. LOOP2_Y_SHIFT is kept as a named,
+# zeroed constant (rather than deleted) so the workaround can be dialed back
+# in if this margin turns out to be insufficient once tested in the running
+# sim - not yet empirically confirmed for UR20, unlike the UR10 numbers
+# above which were.
+LOOP2_Y_SHIFT = 0.0  # applied to every ConveyorTrack_08.._15 prim's Y translate
 
-# With the shift applied, loop 2's centerline moves from Y=2.645 to ~1.835 and
-# its near edge from Y=2.195 to ~1.385. Pick point is ~Y=0.04 (where boxes
-# naturally rest on loop 1); place point below is safely inboard of the new
-# near edge. Reach needed each side from the balanced midpoint is now ~0.8 m
-# - ~62% of the UR10's 1.3 m spec, comfortable margin below the ~90% that
-# failed above.
-ROBOT_POSITION = (-3.0, 0.84, 0.0)  # (x, y, z-of-ground-contact)
+ROBOT_POSITION = (-3.0, 1.22, 0.0)  # (x, y, z-of-ground-contact)
 PEDESTAL_HEIGHT = 1.6
-PLACE_XY = (-3.0, 1.64)  # on ConveyorTrack_09's belt (post-shift), safely inboard of its near edge
+PLACE_XY = (-3.0, 2.4)  # on ConveyorTrack_09's belt (un-shifted), safely inboard of its near edge (Y=2.195)
 
 # Any occupancy hit whose prim path falls under one of these roots is belt/
 # structure/robot geometry, not a transported item, and is excluded from
@@ -388,20 +384,27 @@ def main() -> None:
     place_belt_top_z = bbox_cache.ComputeWorldBound(place_belt_prim).ComputeAlignedRange().GetMax()[2]
 
     box_rigid_prims = {path: RigidPrim(path) for path in KNOWN_BOX_PATHS}
-    pick_place = MagicAttachPickPlace(
-        robot=robot, place_xy=PLACE_XY, place_belt_top_z=place_belt_top_z, box_rigid_prims=box_rigid_prims
-    )
-    print("[conveyor_indexer] robot + pick/place controller ready, calling world.reset()", flush=True)
+    print("[conveyor_indexer] robot ready, calling world.reset()", flush=True)
 
     world.reset()
     check_pos, _ = robot.get_world_poses()
-    check_ee_pos, _ = robot.end_effector_link.get_world_poses()
-    print(
-        f"[conveyor_indexer] DEBUG robot base pose AFTER world.reset(): {check_pos.numpy()} "
-        f"ee_link pose AFTER world.reset(): {check_ee_pos.numpy()}",
-        flush=True,
+    print(f"[conveyor_indexer] DEBUG robot base pose AFTER world.reset(): {check_pos.numpy()}", flush=True)
+    print("[conveyor_indexer] world.reset() done", flush=True)
+
+    # MagicAttachPickPlace builds the cuMotion RmpFlowController + collision
+    # world, which needs a valid PhysX tensor entity (robot.get_world_poses(),
+    # the SceneQuery obstacle scan) - must happen AFTER world.reset(), unlike
+    # the previous UR10/raw-IK version where construction was lightweight
+    # enough to happen before it.
+    pick_place = MagicAttachPickPlace(
+        robot=robot,
+        robot_path=ROBOT_PATH,
+        place_xy=PLACE_XY,
+        place_belt_top_z=place_belt_top_z,
+        box_rigid_prims=box_rigid_prims,
+        physics_dt=world.get_physics_dt(),
     )
-    print("[conveyor_indexer] world.reset() done, entering main loop", flush=True)
+    print("[conveyor_indexer] pick/place controller ready, entering main loop", flush=True)
 
     control_period_s = 1.0 / CONTROL_HZ
     last_control_time = 0.0
@@ -433,9 +436,9 @@ def main() -> None:
                 world.step(render=True)
                 sim_time += world.get_physics_dt()
 
-                # Pick-and-place motion runs every physics step for smooth IK
-                # convergence; conveyor indexing runs at the coarser control
-                # rate. `pick_ready`/`pick_box_path` only refresh at the
+                # Pick-and-place motion runs every physics step for smooth
+                # RMPflow-driven convergence; conveyor indexing runs at the
+                # coarser control rate. `pick_ready`/`pick_box_path` only refresh at the
                 # control rate but are read every physics step - fine, since
                 # they only matter at the (infrequent) moment WAITING checks
                 # them.

@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot name="ur20">
+  <link name="base_link">
+    <inertial>
+      <mass value="4"/>
+      <inertia ixx="0.00610633" ixy="0" ixz="0" iyy="0.00610633" iyz="0" izz="0.01125"/>
+    </inertial>
+    <visual name="base_link">
+      <origin xyz="0 0 0" rpy="1.57079633 0 0"/>
+      <geometry>
+        <mesh filename="./meshes/base_link_2.obj"/>
+      </geometry>
+    </visual>
+    <visual name="mesh">
+      <geometry>
+        <mesh filename="./meshes/mesh_14.obj"/>
+      </geometry>
+    </visual>
+    <collision name="mesh">
+      <geometry>
+        <mesh filename="./meshes/mesh_14.obj"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="shoulder_link">
+    <inertial>
+      <mass value="16.34300041"/>
+      <inertia ixx="0.06613328" ixy="0" ixz="0" iyy="0.06613328" iyz="0" izz="0.04596469"/>
+    </inertial>
+    <visual name="shoulder_link">
+      <origin xyz="0 0 0" rpy="0 0 0.00000008"/>
+      <geometry>
+        <mesh filename="./meshes/shoulder_link_2.obj"/>
+      </geometry>
+    </visual>
+    <visual name="mesh">
+      <origin xyz="0 0 0" rpy="0 0 -3.14159257"/>
+      <geometry>
+        <mesh filename="./meshes/mesh_15.obj"/>
+      </geometry>
+    </visual>
+    <collision name="mesh">
+      <origin xyz="0 0 0" rpy="0 0 -3.14159257"/>
+      <geometry>
+        <mesh filename="./meshes/mesh_15.obj"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="upper_arm_link">
+    <inertial>
+      <origin xyz="-0.426 0 0.27500001" rpy="0 0 0"/>
+      <mass value="29.63199997"/>
+      <inertia ixx="1.8341682" ixy="0" ixz="0" iyy="1.8341682" iyz="0" izz="0.08334"/>
+    </inertial>
+    <visual name="upper_arm_link">
+      <origin xyz="0.00000001 0.00000001 -0.00000001" rpy="0.0000001 -0.00000004 -0.00000004"/>
+      <geometry>
+        <mesh filename="./meshes/upper_arm_link_2.obj"/>
+      </geometry>
+    </visual>
+    <visual name="mesh">
+      <origin xyz="0 -0.00000002 0.26000001" rpy="1.57079637 0.0000001 -1.57079637"/>
+      <geometry>
+        <mesh filename="./meshes/mesh_16.obj"/>
+      </geometry>
+    </visual>
+    <collision name="mesh">
+      <origin xyz="0 -0.00000002 0.26000001" rpy="1.57079637 0.0000001 -1.57079637"/>
+      <geometry>
+        <mesh filename="./meshes/mesh_16.obj"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="forearm_link">
+    <inertial>
+      <origin xyz="-0.36434999 0 0.043" rpy="0 0 0"/>
+      <mass value="7.87900019"/>
+      <inertia ixx="0.35972786" ixy="0" ixz="0" iyy="0.35972786" iyz="0" izz="0.02215969"/>
+    </inertial>
+    <visual name="forearm_link">
+      <origin xyz="0 0 0" rpy="0.00000003 -0.00000003 -0.00000003"/>
+      <geometry>
+        <mesh filename="./meshes/forearm_link_2.obj"/>
+      </geometry>
+    </visual>
+    <visual name="mesh">
+      <origin xyz="0 0 0.043" rpy="1.57079637 0.00000004 -1.57079637"/>
+      <geometry>
+        <mesh filename="./meshes/mesh_17.obj"/>
+      </geometry>
+    </visual>
+    <collision name="mesh">
+      <origin xyz="0 0 0.043" rpy="1.57079637 0.00000004 -1.57079637"/>
+      <geometry>
+        <mesh filename="./meshes/mesh_17.obj"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="wrist_1_link">
+    <inertial>
+      <mass value="3.0539999"/>
+      <inertia ixx="0.00795948" ixy="0" ixz="0" iyy="0.00795948" iyz="0" izz="0.00858937"/>
+    </inertial>
+    <visual name="wrist_1_link">
+      <origin xyz="0.00000004 0.00000001 0.00000001" rpy="0.00000003 0 0"/>
+      <geometry>
+        <mesh filename="./meshes/wrist_1_link_2.obj"/>
+      </geometry>
+    </visual>
+    <visual name="mesh">
+      <origin xyz="0.00000004 0.00000001 -0.07749999" rpy="1.57079636 0 0"/>
+      <geometry>
+        <mesh filename="./meshes/mesh_18.obj"/>
+      </geometry>
+    </visual>
+    <collision name="mesh">
+      <origin xyz="0.00000004 0.00000001 -0.07749999" rpy="1.57079636 0 0"/>
+      <geometry>
+        <mesh filename="./meshes/mesh_18.obj"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="wrist_2_link">
+    <inertial>
+      <mass value="3.12599993"/>
+      <inertia ixx="0.00814713" ixy="0" ixz="0" iyy="0.00814713" iyz="0" izz="0.00879188"/>
+    </inertial>
+    <visual name="wrist_2_link">
+      <origin xyz="0 0 0" rpy="0.00000006 0 0"/>
+      <geometry>
+        <mesh filename="./meshes/wrist_2_link_2.obj"/>
+      </geometry>
+    </visual>
+    <visual name="mesh">
+      <origin xyz="0 0 -0.07490001" rpy="0.00000006 0 0"/>
+      <geometry>
+        <mesh filename="./meshes/mesh_19.obj"/>
+      </geometry>
+    </visual>
+    <collision name="mesh">
+      <origin xyz="0 0 -0.07490001" rpy="0.00000006 0 0"/>
+      <geometry>
+        <mesh filename="./meshes/mesh_19.obj"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="wrist_3_link">
+    <inertial>
+      <origin xyz="0 0 -0.025" rpy="0 0 0"/>
+      <mass value="0.84600002"/>
+      <inertia ixx="0.00060454" ixy="0" ixz="0" iyy="0.00060454" iyz="0" izz="0.00085657"/>
+    </inertial>
+    <visual name="wrist_3_link">
+      <origin xyz="-0.00000001 0 -0.00000006" rpy="-0.00000006 0 0"/>
+      <geometry>
+        <mesh filename="./meshes/wrist_3_link_2.obj"/>
+      </geometry>
+    </visual>
+    <visual name="mesh">
+      <origin xyz="-0.00000001 -0 -0.07000006" rpy="1.5707963 0 0"/>
+      <geometry>
+        <mesh filename="./meshes/mesh_20.obj"/>
+      </geometry>
+    </visual>
+    <collision name="mesh">
+      <origin xyz="-0.00000001 -0 -0.07000006" rpy="1.5707963 0 0"/>
+      <geometry>
+        <mesh filename="./meshes/mesh_20.obj"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="shoulder_pan_joint" type="revolute">
+    <origin xyz="0 0 0.23630001" rpy="0 0 -3.14159257"/>
+    <parent link="base_link"/>
+    <child link="shoulder_link"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.28318531" upper="6.28318531" velocity="2.0943951"/>
+    <dynamics friction="0"/>
+    <!-- isaac:source_drive {"armature": 0.0, "drive": {"damping": 46.70436096191406, "max_force": 730.0, "stiffness": 11676.08984375, "target_position": 0.0}, "instance": "angular", "source": "physx"} -->
+  </joint>
+  <joint name="shoulder_lift_joint" type="revolute">
+    <origin xyz="0 0 0" rpy="1.57079627 0 0"/>
+    <parent link="shoulder_link"/>
+    <child link="upper_arm_link"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.28318531" upper="6.28318531" velocity="2.0943951"/>
+    <dynamics friction="0"/>
+    <!-- isaac:source_drive {"armature": 0.0, "drive": {"damping": 46.70436096191406, "max_force": 730.0, "stiffness": 11676.08984375, "target_position": 0.0}, "instance": "angular", "source": "physx"} -->
+  </joint>
+  <joint name="elbow_joint" type="revolute">
+    <origin xyz="-0.86199999 0 0" rpy="0.00000006 0 0"/>
+    <parent link="upper_arm_link"/>
+    <child link="forearm_link"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.14159265" upper="3.14159265" velocity="2.61799361"/>
+    <dynamics friction="0"/>
+    <!-- isaac:source_drive {"armature": 0.0, "drive": {"damping": 46.70436096191406, "max_force": 430.0, "stiffness": 11676.08984375, "target_position": 0.0}, "instance": "angular", "source": "physx"} -->
+  </joint>
+  <joint name="wrist_1_joint" type="revolute">
+    <origin xyz="-0.72869998 0 0.20100001" rpy="0 0 0"/>
+    <parent link="forearm_link"/>
+    <child link="wrist_1_link"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.28318531" upper="6.28318531" velocity="3.66519116"/>
+    <dynamics friction="0"/>
+    <!-- isaac:source_drive {"armature": 0.0, "drive": {"damping": 0.8071900010108948, "max_force": 100.0, "stiffness": 3526.0205078125, "target_position": 0.0}, "instance": "angular", "source": "physx"} -->
+  </joint>
+  <joint name="wrist_2_joint" type="revolute">
+    <origin xyz="0.00000004 -0.15929998 0.00000001" rpy="1.57079627 0 0"/>
+    <parent link="wrist_1_link"/>
+    <child link="wrist_2_link"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.28318531" upper="6.28318531" velocity="3.66519116"/>
+    <dynamics friction="0"/>
+    <!-- isaac:source_drive {"armature": 0.0, "drive": {"damping": 0.42250001430511475, "max_force": 100.0, "stiffness": 105.62460327148438, "target_position": 0.0}, "instance": "angular", "source": "physx"} -->
+  </joint>
+  <joint name="wrist_3_joint" type="revolute">
+    <origin xyz="0 0.15430001 0.00000001" rpy="-1.57079621 -0.00000009 0.00000009"/>
+    <parent link="wrist_2_link"/>
+    <child link="wrist_3_link"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.28318531" upper="6.28318531" velocity="3.66519116"/>
+    <dynamics friction="0"/>
+    <!-- isaac:source_drive {"armature": 0.0, "drive": {"damping": 2.5, "max_force": 100.0, "stiffness": 625.0, "target_position": 0.0}, "instance": "angular", "source": "physx"} -->
+  </joint>
+  <link name="tool0"/>
+  <joint name="wrist_3_link-tool0_fixed_joint" type="fixed">
+    <origin xyz="0.00000000 0.00000000 0.00000000" rpy="1.57079637 -0.00000004 1.57079637"/>
+    <parent link="wrist_3_link"/>
+    <child link="tool0"/>
+  </joint>
+</robot>

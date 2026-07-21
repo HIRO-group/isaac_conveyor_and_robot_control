@@ -1,0 +1,166 @@
+{
+    "centers": [
+        [
+            0.009244304150342941,
+            -0.0029179947450757027,
+            0.47407054901123047
+        ],
+        [
+            -0.00904631707817316,
+            0.005718364380300045,
+            0.23389150202274323
+        ],
+        [
+            0.0071680848486721516,
+            -0.060573626309633255,
+            0.8470647931098938
+        ],
+        [
+            -0.0010123051470145583,
+            0.02471052296459675,
+            0.8703400492668152
+        ],
+        [
+            -0.02691102772951126,
+            -0.11703139543533325,
+            0.9196149110794067
+        ],
+        [
+            0.056721411645412445,
+            -0.06567195057868958,
+            0.34728625416755676
+        ],
+        [
+            -0.06030634418129921,
+            0.056893207132816315,
+            0.3655577600002289
+        ],
+        [
+            -0.025558825582265854,
+            0.033226028084754944,
+            0.7775217294692993
+        ],
+        [
+            0.029098985716700554,
+            0.05266236141324043,
+            -0.06326083838939667
+        ],
+        [
+            0.0051604220643639565,
+            0.018553752452135086,
+            0.6613739132881165
+        ]
+    ],
+    "radii": [
+        0.1503380686044693,
+        0.1407422423362732,
+        0.12427053600549698,
+        0.07620479166507721,
+        0.017791401594877243,
+        0.0009627133840695024,
+        0.002883540466427803,
+        0.06489867717027664,
+        0.016091767698526382,
+        0.11591203510761261
+    ],
+    "masses": [
+        14.232969284057617,
+        11.677824974060059,
+        8.038834571838379,
+        1.8536827564239502,
+        0.023589516058564186,
+        3.737486167665338e-06,
+        0.00010043075599242002,
+        1.1449753046035767,
+        0.017454197630286217,
+        6.523403167724609
+    ],
+    "mesh_path": "/home/ubuntu/conveyor_indexing/robot_configs/ur20/meshes/mesh_16.obj",
+    "num_spheres": 10,
+    "per_sphere_mass": false,
+    "config": {
+        "model": {
+            "num_spheres": 24,
+            "mesh_path": "/home/ubuntu/conveyor_indexing/robot_configs/ur20/meshes/mesh_16.obj",
+            "device": "cuda",
+            "initial_radius_variation": 0.1,
+            "num_inside_samples": 5000,
+            "num_surface_samples": 5000,
+            "max_spheres": 25,
+            "density": 1000.0,
+            "per_sphere_mass": false
+        },
+        "training": {
+            "iterations": 500,
+            "verbose_frequency": 100,
+            "logging_enabled": false,
+            "center_lr": 0.002,
+            "radius_lr": 0.1,
+            "mass_lr": 0.01,
+            "grad_clip_norm": 1.0,
+            "coverage_weight": 5000.0,
+            "overlap_weight": 0.1,
+            "boundary_weight": 1.0,
+            "surface_weight": 0.1,
+            "containment_weight": 1.0,
+            "sqem_weight": 10.0,
+            "mass_weight": 0.0,
+            "com_weight": 0.0,
+            "inertia_weight": 0.0,
+            "flatness_weight": 0.0,
+            "hausdorff_weight": 0.0,
+            "mesh_containment_weight": 100.0,
+            "early_stopping": false,
+            "convergence_patience": 50,
+            "convergence_threshold": 0.001,
+            "density_control_enabled": true,
+            "density_control_min_interval": 150,
+            "density_control_patience": 1,
+            "density_control_grad_threshold": 0.0001,
+            "density_control_warmup_steps": 10,
+            "density_control_cooling_factor": 0.85,
+            "density_control_min_radius_fraction": 0.001
+        },
+        "visualization": {
+            "enabled": false,
+            "off_screen": true,
+            "save_video": false,
+            "video_filename": "sphere_filling.mp4",
+            "render_interval": 5,
+            "sphere_color": "blue",
+            "sphere_opacity": 0.3,
+            "mesh_color": "white",
+            "mesh_line_width": 1.5,
+            "mesh_opacity": 0.8,
+            "show_sample_points": true,
+            "show_surface_points": true,
+            "sample_points_subsample": 100000,
+            "surface_points_subsample": 100000,
+            "sample_point_color": "red",
+            "surface_point_color": "green",
+            "point_size": 5,
+            "camera_position": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "camera_focal_point": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "camera_view_up": [
+                0.0,
+                0.0,
+                1.0
+            ],
+            "camera_azimuth": 80,
+            "camera_elevation": 120,
+            "camera_roll": 120,
+            "camera_zoom": 1.5
+        },
+        "results_dir": "/home/ubuntu/conveyor_indexing/robot_configs/ur20/morphit_spheres",
+        "output_filename": "upper_arm_link.json",
+        "random_seed": null
+    }
+}

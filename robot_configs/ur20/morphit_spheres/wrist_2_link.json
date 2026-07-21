@@ -1,0 +1,145 @@
+{
+    "centers": [
+        [
+            0.0005657972651533782,
+            0.004612529184669256,
+            0.053277499973773956
+        ],
+        [
+            2.693776878004428e-05,
+            0.04923665523529053,
+            0.07284758239984512
+        ],
+        [
+            -0.023494526743888855,
+            -0.03431198000907898,
+            0.024240583181381226
+        ],
+        [
+            0.03997178375720978,
+            -0.03837452828884125,
+            0.029194463044404984
+        ],
+        [
+            -0.04160192608833313,
+            0.02616070583462715,
+            2.110432251356542e-05
+        ],
+        [
+            -0.02133103646337986,
+            0.06268282979726791,
+            0.0248264167457819
+        ],
+        [
+            -0.0388985350728035,
+            -0.02406086027622223,
+            0.10482951253652573
+        ]
+    ],
+    "radii": [
+        0.07495322078466415,
+        0.06355704367160797,
+        0.024022918194532394,
+        0.019731083884835243,
+        0.002405754756182432,
+        0.021958570927381516,
+        0.005737616214901209
+    ],
+    "masses": [
+        1.7638412714004517,
+        1.0754238367080688,
+        0.05807187780737877,
+        0.03217669576406479,
+        5.832337410538457e-05,
+        0.04435073211789131,
+        0.000791194150224328
+    ],
+    "mesh_path": "/home/ubuntu/conveyor_indexing/robot_configs/ur20/meshes/mesh_19.obj",
+    "num_spheres": 7,
+    "per_sphere_mass": false,
+    "config": {
+        "model": {
+            "num_spheres": 7,
+            "mesh_path": "/home/ubuntu/conveyor_indexing/robot_configs/ur20/meshes/mesh_19.obj",
+            "device": "cuda",
+            "initial_radius_variation": 0.1,
+            "num_inside_samples": 5000,
+            "num_surface_samples": 5000,
+            "max_spheres": 25,
+            "density": 1000.0,
+            "per_sphere_mass": false
+        },
+        "training": {
+            "iterations": 500,
+            "verbose_frequency": 50,
+            "logging_enabled": false,
+            "center_lr": 0.002,
+            "radius_lr": 0.1,
+            "mass_lr": 0.01,
+            "grad_clip_norm": 1.0,
+            "coverage_weight": 5000.0,
+            "overlap_weight": 0.1,
+            "boundary_weight": 1.0,
+            "surface_weight": 0.1,
+            "containment_weight": 1.0,
+            "sqem_weight": 10.0,
+            "mass_weight": 0.0,
+            "com_weight": 0.0,
+            "inertia_weight": 0.0,
+            "flatness_weight": 0.0,
+            "hausdorff_weight": 0.0,
+            "mesh_containment_weight": 100.0,
+            "early_stopping": false,
+            "convergence_patience": 50,
+            "convergence_threshold": 0.001,
+            "density_control_enabled": true,
+            "density_control_min_interval": 150,
+            "density_control_patience": 1,
+            "density_control_grad_threshold": 0.0001,
+            "density_control_warmup_steps": 10,
+            "density_control_cooling_factor": 0.85,
+            "density_control_min_radius_fraction": 0.001
+        },
+        "visualization": {
+            "enabled": false,
+            "off_screen": true,
+            "save_video": false,
+            "video_filename": "sphere_filling.mp4",
+            "render_interval": 5,
+            "sphere_color": "blue",
+            "sphere_opacity": 0.3,
+            "mesh_color": "white",
+            "mesh_line_width": 1.5,
+            "mesh_opacity": 0.8,
+            "show_sample_points": true,
+            "show_surface_points": true,
+            "sample_points_subsample": 100000,
+            "surface_points_subsample": 100000,
+            "sample_point_color": "red",
+            "surface_point_color": "green",
+            "point_size": 5,
+            "camera_position": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "camera_focal_point": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "camera_view_up": [
+                0.0,
+                0.0,
+                1.0
+            ],
+            "camera_azimuth": 80,
+            "camera_elevation": 120,
+            "camera_roll": 120,
+            "camera_zoom": 1.5
+        },
+        "results_dir": "/home/ubuntu/conveyor_indexing/robot_configs/ur20/morphit_spheres",
+        "output_filename": "wrist_2_link.json",
+        "random_seed": null
+    }
+}
