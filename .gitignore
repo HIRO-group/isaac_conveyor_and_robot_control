@@ -1,0 +1,5 @@
+__pycache__/
+.mypy_cache/
+data/
+*.parquet
+.claude/settings.local.json
