@@ -1,0 +1,103 @@
+# The robot description defines the generalized coordinates and how to map those
+# to the underlying URDF dofs.
+
+api_version: 1.0
+
+# Defines the generalized coordinates. Each generalized coordinate is assumed
+# to have an entry in the URDF.
+# Lula will only use these joints to control the robot position.
+cspace:
+    - shoulder_pan_joint
+    - shoulder_lift_joint
+    - elbow_joint
+    - wrist_1_joint
+    - wrist_2_joint
+    - wrist_3_joint
+default_q: [
+    -1.57,-1.57,-1.57,-1.57,1.57,0.0
+]
+
+acceleration_limits: [
+   10.0,10.0,10.0,10.0,10.0,10.0
+]
+
+jerk_limits: [
+   10000.0,10000.0,10000.0,10000.0,10000.0,10000.0
+]
+
+# Most dimensions of the cspace have a direct corresponding element
+# in the URDF. This list of rules defines how unspecified coordinates
+# should be extracted or how values in the URDF should be overwritten.
+
+cspace_to_urdf_rules:
+
+# Lula uses collision spheres to define the robot geometry in order to avoid
+# collisions with external obstacles.  If no spheres are specified, Lula will
+# not be able to avoid obstacles.
+
+collision_spheres:
+  - shoulder_link:
+    - "center": [-0.001, 0.03987, -0.00643]
+      "radius": 0.13176
+    - "center": [0.01624, 0.00325, -0.05511]
+      "radius": 0.09848
+    - "center": [-0.00503, -0.00261, -0.06368]
+      "radius": 0.11708
+    - "center": [-0.06551, 0.11666, 0.01223]
+      "radius": 0.03448
+  - upper_arm_link:
+    - "center": [0.00924, -0.00292, 0.47407]
+      "radius": 0.15034
+    - "center": [-0.00905, 0.00572, 0.23389]
+      "radius": 0.14074
+    - "center": [0.00717, -0.06057, 0.84706]
+      "radius": 0.12427
+    - "center": [-0.00101, 0.02471, 0.87034]
+      "radius": 0.0762
+    - "center": [-0.02691, -0.11703, 0.91961]
+      "radius": 0.01779
+    - "center": [-0.02556, 0.03323, 0.77752]
+      "radius": 0.0649
+    - "center": [0.0291, 0.05266, -0.06326]
+      "radius": 0.01609
+    - "center": [0.00516, 0.01855, 0.66137]
+      "radius": 0.11591
+  - forearm_link:
+    - "center": [-0.00369, 0.00747, 0.3847]
+      "radius": 0.08032
+    - "center": [0.00644, -0.00096, 0.19046]
+      "radius": 0.10025
+    - "center": [0.00313, 0.00132, 0.508]
+      "radius": 0.06837
+    - "center": [0.00521, 0.00425, 0.29741]
+      "radius": 0.08347
+    - "center": [0.00267, -0.00027, 0.6003]
+      "radius": 0.07123
+    - "center": [-0.04907, 0.00771, 0.67065]
+      "radius": 0.01883
+    - "center": [-0.00648, 0.05055, 0.66834]
+      "radius": 0.01649
+    - "center": [-0.00516, -0.00605, 0.45317]
+      "radius": 0.08212
+    - "center": [0.06727, -0.03237, 0.11054]
+      "radius": 0.00889
+    - "center": [-0.03694, -0.00822, 0.35123]
+      "radius": 0.01646
+  - wrist_1_link:
+    - "center": [-0.00313, 0.05598, 0.00231]
+      "radius": 0.08134
+    - "center": [0.00042, 0.07716, 0.04825]
+      "radius": 0.06315
+  - wrist_2_link:
+    - "center": [0.00057, 0.00461, 0.05328]
+      "radius": 0.07495
+    - "center": [3e-05, 0.04924, 0.07285]
+      "radius": 0.06356
+    - "center": [-0.02349, -0.03431, 0.02424]
+      "radius": 0.02402
+    - "center": [0.03997, -0.03837, 0.02919]
+      "radius": 0.01973
+    - "center": [-0.02133, 0.06268, 0.02483]
+      "radius": 0.02196
+    - "center": [-0.0389, -0.02406, 0.10483]
+      "radius": 0.00574

@@ -3,8 +3,9 @@
 Zone-accumulation indexing controller for the inbuilt surface-velocity
 conveyors in `~/conveyor_setup.usd` (two closed loops), with per-tick data
 logging designed for later imitation learning and reinforcement learning on
-the indexing policy, plus a UR10 that picks a box off loop 1 and places it on
-loop 2 using magic attach (no real grasp physics).
+the indexing policy, plus a UR20 (driven by NVIDIA cuMotion RMPflow) that
+picks a box off loop 1 and places it on loop 2 using magic attach (no real
+grasp physics).
 
 ## Design
 
@@ -28,14 +29,23 @@ loop 2 using magic attach (no real grasp physics).
   `~/theia/proto/plc-connector/plc-connector.proto` - see that module's
   docstring for the exact state cycle and what's deliberately not
   implemented.
-- **Pick-and-place**: `pick_and_place.py`'s `MagicAttachPickPlace` runs a UR10
+- **Pick-and-place**: `pick_and_place.py`'s `MagicAttachPickPlace` runs a UR20
   (on a static pedestal at the reach-balanced midpoint between the two loops)
-  through a fixed-duration phase state machine: approach, descend, "attach"
-  (disable the box's rigid body and rigidly offset-follow the end effector -
-  privileged pose queries only, no perception), lift, traverse, descend,
-  detach, retract. `ConveyorTrack_01` (loop 1) is configured as the **hold
-  zone**: `ConveyorLineController` forces its `downstream_clear` to always
-  False, so an arriving box is held stopped in front of the robot instead of
+  through a phase state machine: approach, descend, "attach" (disable the
+  box's rigid body and rigidly offset-follow the end effector - privileged
+  pose queries only, no perception), lift, traverse, descend, detach,
+  retract. Motion is driven by NVIDIA cuMotion's GPU RMPflow planner
+  (`isaacsim.robot_motion.cumotion.RmpFlowController`) rather than per-tick
+  differential IK - smooth, collision-aware trajectories against the
+  conveyor structure/pedestal as real obstacles, instead of a stateless
+  one-shot IK solve every physics tick. Phase transitions are success-gated
+  (converged tool-frame pose within `EE_POSITION_THRESHOLD`, with a minimum
+  tick floor and a fixed-duration timeout as a fallback safety net) rather
+  than purely fixed-duration. See "Known gaps" for the UR10->UR20 migration
+  history and the config-generation pipeline under `robot_configs/`.
+  `ConveyorTrack_01` (loop 1) is configured as the **hold zone**:
+  `ConveyorLineController` forces its `downstream_clear` to always False, so
+  an arriving box is held stopped in front of the robot instead of
   auto-advancing, and only "starves" (lets the next box advance in) once the
   robot's magic-attach has moved the box away and occupancy clears. See
   `PICK_ZONE_INDEX`/`hold_zone_indices` in `conveyor_indexer.py`.
@@ -149,22 +159,117 @@ extension loading.
   in `conveyor_indexer.py` disables its `RigidBodyAPI` each run. Worth
   actually deleting the stray graph from `conveyor_setup.usd` directly at some
   point instead of working around it in every script that opens the stage.
-- **Pick-and-place phase timing is fixed-duration, not tolerance-based** (see
-  `PHASE_TICKS` in `pick_and_place.py`, same pattern as this codebase's own
-  `FrankaPickPlace`). If the IK hasn't converged by the time a phase's tick
-  budget elapses, the next phase starts anyway from wherever the arm actually
-  is. Worked fine in testing at the current pick/place distances but has no
-  margin built in for e.g. a heavier box changing settle time.
-- **Reach margin is real but not generous.** The UR10's ~1.3 m spec reach vs.
-  ~1.2 m needed to each side (see conversation notes / `ROBOT_POSITION`,
-  `PLACE_XY`) leaves less headroom than ideal, particularly near full
-  extension where IK conditioning gets worse. Worked in testing; if you change
-  `PLACE_XY` to sit closer to the belt centerline (more "natural" placement)
-  or move the pedestal, re-check the reach math first.
-- **No obstacle avoidance.** The differential-IK approach (`set_end_effector_pose`)
-  has no notion of the conveyor structure, guard rails, or the pedestal itself
-  as obstacles - waypoints were chosen to clear them by construction (approach
-  height, etc.), not verified by collision checking.
+- ~~Pick-and-place phase timing is fixed-duration, not tolerance-based~~
+  **Resolved**: phase advancement is now success-gated on the tool frame's
+  world position converging within `EE_POSITION_THRESHOLD` of the phase
+  target (with a `MIN_STEPS_PER_PHASE` floor to avoid a one-tick fluke). The
+  old fixed-duration values (`PHASE_TICKS`) are kept as a logged timeout
+  safety net, not the primary signal - see `_drive_to()` in
+  `pick_and_place.py`.
+- ~~Reach margin is real but not generous~~ **Resolved by the UR10->UR20
+  swap** (see below) - not yet re-validated empirically in the running sim
+  at time of writing. The UR20 has a 1.75 m spec reach vs. the ~1.18 m needed
+  each side from the balanced midpoint (`ROBOT_POSITION`/`PLACE_XY`), about
+  67% of spec reach vs. the UR10's failed ~90% attempt - comfortable margin
+  on paper, but confirm in the running sim before relying on it, same as the
+  UR10 numbers before it were confirmed via 55s of logged data.
+- ~~No obstacle avoidance~~ **Resolved by the cuMotion migration** (see
+  below): `MagicAttachPickPlace` now registers the conveyor structure and
+  pedestal as real collision obstacles via
+  `isaacsim.robot_motion.experimental.motion_generation.WorldBinding` +
+  `SceneQuery`, so RMPflow plans around them instead of relying on
+  waypoints chosen to clear them by construction. Both known box paths are
+  explicitly excluded from the tracked obstacle set (a carried/targeted box
+  must never register as something to dodge).
+- **UR10 -> UR20 + raw-IK -> cuMotion RMPflow migration.** The previous
+  version drove the UR10 with a stateless per-tick differential-IK solve
+  (`set_end_effector_pose`) - visibly jerky motion, no obstacle awareness,
+  and (worse) let the approaching arm physically collide with and displace
+  the box before "attaching" it (~0.34 m offset observed between the box and
+  end effector at `ATTACH` in one logged run). Migrated to:
+  - **UR20** (1.75 m spec reach) instead of the UR10 (~1.3 m), to stop the
+    reach margin being a nail-biter.
+  - **cuMotion RMPflow** (`isaacsim.robot_motion.cumotion.RmpFlowController`)
+    instead of raw differential IK, for smooth, collision-aware motion.
+  - **Disabling the box's rigid body the moment it's selected as the pick
+    target** (`WAITING` -> `MOVE_ABOVE_PICK`), not at `ATTACH` as before -
+    this is what actually fixes the shove-before-grasp bug (a disabled
+    rigid body can't be physically displaced by anything, including the
+    approaching arm), not the smoother motion by itself.
+
+  cuMotion ships a ready-made config only for Franka and UR10 (confirmed:
+  `isaacsim.robot_motion.cumotion`'s `robot_configurations/` directory has
+  exactly those two - nothing for UR20 or any other UR variant). A UR20
+  config was generated from scratch under `robot_configs/ur20/` via three
+  scripts in `robot_configs/` (kept for reproducibility, not one-off
+  interactive work):
+  1. `generate_ur20_urdf.py` - exports `robot.urdf` directly from the
+     bundled `ur20.usd` asset via `isaacsim.asset.exporter.urdf.UsdToUrdfConverter`
+     (rather than sourcing/processing Universal Robots' external ROS xacro
+     files), so the URDF's kinematics/limits are guaranteed to match what's
+     actually in the scene. Also appends a `tool0` fixed frame (absent from
+     the bundled asset, which only has a `flange` Xform under
+     `wrist_3_link`) sourced from that prim's actual authored transform, not
+     guessed.
+  2. `generate_ur20_spheres_morphit.py` - generates collision spheres per
+     link using [MorphIt](https://github.com/HIRO-group/MorphIt-1) (a
+     gradient-based sphere-packing optimizer, run in an isolated venv - see
+     script docstring) instead of cuMotion's own simpler built-in generator,
+     per explicit request. Two of UR20's seven collision meshes
+     (`upper_arm_link`, `forearm_link`) are non-watertight, which makes
+     MorphIt's final escaped-sphere safety prune considerably more
+     aggressive (e.g. 12 requested spheres down to 5 survived on the first
+     pass); requesting roughly double the desired count and letting the
+     prune do its job recovered most of the intended density (12->10,
+     15->14) - documented in the script rather than silently accepted.
+  3. `generate_ur20_xrdf.py` - builds `robot.xrdf` from the MorphIt sphere
+     data using `isaacsim.robot_setup.xrdf_editor`'s headless core API
+     (`EditorState`/`CollisionSphereEditor.add_sphere()`, bypassing Lula's
+     own mesh-based generator entirely) rather than the interactive "Lula
+     Robot Description Editor" UI - confirmed scriptable (no GUI needed) by
+     reading its source. Mirrors the bundled UR10 config's own split:
+     `upper_arm_link`/`forearm_link`/`wrist_1_link`/`wrist_2_link` get
+     spheres for general obstacle avoidance, `shoulder_link` gets a
+     self-collision-only set, and `base_link`/`wrist_3_link` are instead
+     covered by `rmp_flow.yaml`'s `body_capsules`/`body_collision_controllers`
+     (same split, not an arbitrary omission).
+
+  `rmp_flow.yaml` itself is NOT auto-generated by either tool - same as
+  UR10's own bundled copy, it's a small hand-authored tuning file. UR20's
+  version was adapted from UR10's: the RMPflow gain/weight constants
+  (position/damping gains, metric scalars) are solver tuning, not physical
+  facts about the robot, so they're reused as-is; only the physically-real
+  quantities (`joint_velocity_cap_rmp.max_velocity`, `body_capsules`/
+  `body_collision_controllers` radii) were changed, each sourced from UR20's
+  actual exported URDF limits or measured mesh bounds - see the comments at
+  the top of `robot_configs/ur20/rmp_flow.yaml` for exact values and
+  sourcing. Both `isaacsim.asset.exporter.urdf` and
+  `isaacsim.robot_setup.xrdf_editor` (plus the `lula` Python bindings)
+  needed for this generation pipeline are missing from the runtime Isaac Sim
+  distribution at `/home/ubuntu/IsaacSim` - only present in the built
+  extensions under `/home/ubuntu/IsaacSim-source`'s `_build` output (see
+  each script's docstring for the exact `PYTHONPATH`/enable-extension
+  invocation needed to re-run them).
+
+  Also hit and worked around: `isaacsim.robot_motion.cumotion`'s own shipped
+  code (`transforms.py`, `cumotion_world_interface.py`) calls
+  `np.reshape(arr, shape=[...])` - the `shape=` keyword only exists from
+  NumPy 2.1 onward, but this Isaac Sim install's bundled NumPy is 1.26.4, so
+  every such call raises `TypeError`. This affects any robot driven through
+  `RmpFlowController` on this machine, not just UR20 - even the
+  officially-supported bundled UR10 example would hit it. Patched with a
+  small, reversible `np.reshape` compatibility shim local to
+  `pick_and_place.py`'s own process (never touches the shared Isaac Sim
+  installation) rather than editing the vendored file.
+
+  Not yet re-validated in the running sim as of this migration:
+  `DOWN_ORIENTATION` in `pick_and_place.py` (the tool0 downward-facing
+  quaternion) was chosen as a reachable orientation (confirmed via
+  `robot_configs/smoke_test_ur20_rmpflow.py` converging without error) but
+  not visually confirmed to actually point straight down at the box -
+  tool0's orientation convention differs from the previous UR10 wrapper's
+  `end_effector_link` frame, so the old `get_downward_orientation()` value
+  could not be reused as-is. Confirm visually and adjust if needed.
 - **Single-box capacity per zone/queue depth untested beyond two boxes** -
   behavior with a longer queue of boxes on loop 1, or a busy loop 2, hasn't
   been exercised.
@@ -176,6 +281,11 @@ extension loading.
 | `conveyor_indexer.py` | Standalone Isaac Sim entry point - occupancy sensing, zone wiring (both loops), pick/place wiring, per-tick logging. |
 | `conveyor_state_machine.py` | `ConveyorZoneStateMachine` - the happy-path indexing logic. |
 | `conveyor_indexing_logger.py` | Background-batched parquet writer, schema-compatible with theia's real data collection. |
-| `pick_and_place.py` | `MagicAttachPickPlace` + UR10/pedestal setup - the pick-and-place phase state machine. |
+| `pick_and_place.py` | `MagicAttachPickPlace` + UR20/pedestal setup - the cuMotion-RMPflow-driven pick-and-place phase state machine. |
+| `robot_configs/generate_ur20_urdf.py` | Exports `robot_configs/ur20/robot.urdf` from the bundled `ur20.usd` asset (+ appends a `tool0` frame). |
+| `robot_configs/generate_ur20_spheres_morphit.py` | Generates per-link collision spheres via MorphIt, writes `robot_configs/ur20/morphit_spheres/*.json`. |
+| `robot_configs/generate_ur20_xrdf.py` | Builds `robot_configs/ur20/robot.xrdf` (+ Lula `robot_description.yaml`) from the MorphIt spheres. |
+| `robot_configs/smoke_test_ur20_rmpflow.py` | Standalone RmpFlowController convergence test against the generated UR20 config, in isolation from the full scaffold. |
+| `robot_configs/ur20/` | Generated UR20 cuMotion config: `robot.urdf`, `robot.xrdf`, hand-authored `rmp_flow.yaml`, `meshes/`, `morphit_spheres/`. |
 | `proto/sim_conveyor_action.proto` | Sim-only action schema (see above). |
 | `gen_proto.sh` | Generates Python bindings for both theia's real state schema and the sim action schema. |

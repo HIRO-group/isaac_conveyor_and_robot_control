@@ -1,36 +1,89 @@
-"""Magic-attach pick-and-place: UR10 moves a box from a pick-zone conveyor to a
-place-zone conveyor on another loop.
+"""Magic-attach pick-and-place: UR20 moves a box from a pick-zone conveyor to a
+place-zone conveyor on another loop, driven by NVIDIA cuMotion's GPU RMPflow
+motion planner (isaacsim.robot_motion.cumotion) rather than raw per-tick
+differential IK - smooth, collision-aware motion instead of a stateless
+one-shot IK solve every physics tick (see README's "Known gaps" history for
+why that mattered: the previous UR10 + raw-IK version produced visibly jerky
+motion and let the approaching arm physically shove the box out of place
+before "attaching" it).
 
-No real grasp physics: the box is "magic attached" by disabling its rigid body
-and teleporting it to follow the end effector at a fixed offset, then
-re-enabled at the place location. The box's pose is queried directly
-(privileged / ground truth) - no perception involved. See conveyor_indexer.py
-for how the pick zone's belt is held stopped while occupied, and how it
-resumes once the robot has removed the box ("starved" -> next box advances).
+No real grasp physics: the box is "magic attached" by disabling its rigid
+body and teleporting it to follow the end effector at a fixed offset, then
+re-enabled at the place location. Unlike the previous version, the box's
+rigid body is disabled the MOMENT it's selected as the pick target (on the
+WAITING -> MOVE_ABOVE_PICK transition), not at the ATTACH phase - so the
+approaching arm can never physically collide with and displace it first
+(previously observed: the box ending up ~0.34 m from the assumed pick point
+by the time ATTACH ran, because the arm's own collision geometry nudged it
+during the approach while it was still a live rigid body). The box's pose is
+queried directly (privileged / ground truth) - no perception involved. See
+conveyor_indexer.py for how the pick zone's belt is held stopped while
+occupied, and how it resumes once the robot has removed the box ("starved" ->
+next box advances).
+
+Phase transitions are success-gated (converged end-effector pose), not
+fixed-duration: each phase requires both a small minimum-step floor (avoids a
+one-tick convergence fluke) and the tool frame's world position landing
+within EE_POSITION_THRESHOLD of that phase's target: falls back to the old
+fixed tick budget only as a logged timeout safety net if convergence never
+happens. This mirrors the pattern used by Isaac Sim's own cuMotion
+pick-and-place tutorial
+(standalone_examples/tutorials/manipulation/tutorial_9_pick_place_cumotion.py).
 """
 
 from __future__ import annotations
 
-import math
 from enum import IntEnum
 
 import numpy as np
+import warp as wp
 from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
 import isaacsim.core.experimental.utils.stage as stage_utils
-from isaacsim.core.experimental.objects import Cylinder
-from isaacsim.core.experimental.prims import RigidPrim
-from isaacsim.robot.experimental.manipulators.examples.universal_robots.ur10 import UR10
+import isaacsim.robot_motion.experimental.motion_generation as mg
+from isaacsim.core.experimental.objects import Cylinder, GeomPrim
+from isaacsim.core.experimental.prims import Articulation, RigidPrim
+from isaacsim.robot_motion.cumotion import CumotionWorldInterface, RmpFlowController, load_cumotion_robot
 from isaacsim.storage.native import get_assets_root_path
 
-# Replicated from UR10.__init__'s create_robot=True path (ur10.py) - a
-# reasonable non-singular starting configuration. Needed here because we
-# construct UR10 with create_robot=False (see create_pedestal_and_robot),
-# which skips that block.
-UR10_DEFAULT_JOINT_POSITIONS = [-math.pi / 2, -math.pi / 2, -math.pi / 2, -math.pi / 2, math.pi / 2, 0.0]
+# isaacsim.robot_motion.cumotion's transforms.py / cumotion_world_interface.py
+# call np.reshape(arr, shape=[...]) (confirmed via grep, 6 call sites across
+# those 2 files) - the `shape=` keyword to np.reshape only exists from NumPy
+# 2.1 onward, but this Isaac Sim install's own bundled NumPy is 1.26.4
+# (confirmed), so every one of those calls raises `TypeError: reshape() got
+# an unexpected keyword argument 'shape'`. This is a genuine version mismatch
+# in the shipped extension code, not specific to this robot - even the
+# bundled/officially-supported UR10 cuMotion example hits the identical
+# error. Patched here only in this process (never touches the shared Isaac
+# Sim installation) as a small, reversible compatibility shim.
+_np_reshape = np.reshape
+
+
+def _reshape_shape_kwarg_compat(a, *args, **kwargs):
+    if "shape" in kwargs:
+        kwargs["newshape"] = kwargs.pop("shape")
+    return _np_reshape(a, *args, **kwargs)
+
+
+np.reshape = _reshape_shape_kwarg_compat
+
+UR20_CONFIG_DIR = "/home/ubuntu/conveyor_indexing/robot_configs/ur20"
+TOOL_FRAME_NAME = "tool0"
+# The real USD prim mirroring tool0's transform exactly (see
+# robot_configs/generate_ur20_urdf.py: tool0 was added to the URDF/XRDF as a
+# fixed frame off this prim's actual authored transform, but "tool0" itself
+# is not a real prim in ur20.usd - this "flange" Xform is, so it's used here
+# to query the tool frame's live world pose from the running simulation).
+TOOL_FRAME_LIVE_PRIM_SUBPATH = "wrist_3_link/flange"
+
+# Same bent-elbow seed pose as robot_configs/ur20/robot.xrdf's
+# default_joint_positions (itself matching the bundled UR10 config's own
+# convention - see generate_ur20_xrdf.py for why the raw ~0 rad rest pose is
+# avoided), in cspace.joint_names order (shoulder_pan, shoulder_lift, elbow,
+# wrist_1, wrist_2, wrist_3).
+UR20_DEFAULT_JOINT_POSITIONS = [-1.57, -1.57, -1.57, -1.57, 1.57, 0.0]
 
 APPROACH_HEIGHT = 0.15  # meters above the grasp/place point while transiting
-IK_METHOD = "damped-least-squares"
 
 # A zone reporting Machine=IDLE (held) means the belt has stopped commanding
 # motion, but a box arriving via INDUCTING still carries real momentum and
@@ -40,8 +93,27 @@ IK_METHOD = "damped-least-squares"
 # target, not just "the zone reports occupied+idle."
 PICK_SETTLE_LINEAR_SPEED = 0.02  # m/s
 
-# Fixed tick counts per phase, forward() called once per physics step (120 Hz
-# in conveyor_indexer.py) - same pattern as FrankaPickPlace in this codebase.
+# Downward-facing tool0 orientation (w, x, y, z): 180 deg about world X, so
+# tool0's Z axis (which points outward along the wrist, per the UR flange
+# convention) faces straight down. Validated to converge without error in
+# robot_configs/smoke_test_ur20_rmpflow.py; visually confirm in the running
+# sim that this actually points straight down at the box (not just that it's
+# a reachable orientation) and adjust if not - this is a detail that
+# fundamentally needs visual confirmation, not just a solver convergence
+# check.
+DOWN_ORIENTATION = np.array([0.0, 1.0, 0.0, 0.0])
+
+# EE-position convergence tolerance for phase advancement, and the minimum
+# tick floor before convergence is even checked (avoids a one-tick
+# convergence fluke) - same values used by Isaac Sim's own cuMotion
+# pick-and-place tutorial (_EE_THRESHOLD / _MIN_STEPS in
+# tutorial_9_pick_place_cumotion.py).
+EE_POSITION_THRESHOLD = 0.02  # meters
+MIN_STEPS_PER_PHASE = 15  # ticks, at 120 Hz physics (~0.125 s)
+
+# Per-phase tick budget - now a TIMEOUT SAFETY NET (logged if hit), not the
+# primary advance signal; convergence via EE_POSITION_THRESHOLD is. Kept at
+# the same values as the previous fixed-duration implementation.
 PHASE_TICKS = {
     "MOVE_ABOVE_PICK": 90,
     "DESCEND_TO_PICK": 60,
@@ -52,6 +124,14 @@ PHASE_TICKS = {
     "DETACH": 5,
     "RETRACT": 60,
 }
+
+# Phases where a fresh RMPflow leg begins (controller.reset()) rather than
+# continuing the previous leg's trajectory with just an updated setpoint -
+# mirrors the cuMotion tutorial's reset points (start of pre-grasp, start of
+# lift after grasp, start of retract after release): each is the first
+# motion phase following either the initial WAITING state or a discrete,
+# non-RMPflow-controlled event (attach/detach).
+RESET_ON_ENTRY_PHASES = frozenset({"MOVE_ABOVE_PICK", "LIFT", "RETRACT"})
 
 
 class Phase(IntEnum):
@@ -84,8 +164,8 @@ def create_pedestal_and_robot(
     position: tuple,
     pedestal_height: float,
     pedestal_radius: float = 0.15,
-) -> UR10:
-    """Create a simple static cylindrical pedestal and a UR10 on top of it.
+) -> Articulation:
+    """Create a simple static cylindrical pedestal and a UR20 on top of it.
 
     Args:
         position: (x, y, z) of the pedestal's base (ground contact point).
@@ -104,27 +184,75 @@ def create_pedestal_and_robot(
     # and isn't mistaken for a kinematic/dynamic body by anything else.
     UsdPhysics.CollisionAPI.Apply(pedestal.prims[0])
 
-    # Position the robot via plain USD BEFORE wrapping it in the UR10/
-    # Articulation controller class, rather than via UR10(create_robot=True)
-    # + Articulation.set_world_poses() afterward. The latter was verified
-    # (via get_world_poses() reading back (0, 0, 0) both immediately after
-    # the call and again after world.reset()) to silently not reposition the
-    # robot at this stage of initialization - Articulation.set_world_poses()
-    # targets the articulation's root_joint frame, which apparently doesn't
-    # take a plain Xform write at this point. Setting the reference prim's
-    # own transform directly, before any Articulation/PhysX wrapping exists,
-    # sidesteps that entirely.
-    usd_path = get_assets_root_path() + "/Isaac/Robots/UniversalRobots/ur10/ur10.usd"
+    # Position the robot via plain USD BEFORE wrapping it in the Articulation
+    # class, rather than via Articulation.set_world_poses() afterward. The
+    # latter was verified (via get_world_poses() reading back (0, 0, 0) both
+    # immediately after the call and again after world.reset()) to silently
+    # not reposition the robot at this stage of initialization -
+    # Articulation.set_world_poses() targets the articulation's root_joint
+    # frame, which apparently doesn't take a plain Xform write at this point.
+    # Setting the reference prim's own transform directly, before any
+    # Articulation/PhysX wrapping exists, sidesteps that entirely.
+    usd_path = get_assets_root_path() + "/Isaac/Robots/UniversalRobots/ur20/ur20.usd"
     robot_prim = stage_utils.add_reference_to_stage(usd_path=usd_path, path=robot_path, variants=[])
     xformable = UsdGeom.Xformable(robot_prim)
     xformable.ClearXformOpOrder()
     xformable.AddTranslateOp().Set(Gf.Vec3d(px, py, pz + pedestal_height))
 
-    robot = UR10(robot_path=robot_path, create_robot=False, attach_gripper=False)
-    # create_robot=False skips UR10.__init__'s default-joint-state block too;
-    # replicate it so the arm starts from a sane, non-singular configuration.
-    robot.set_default_state(dof_positions=UR10_DEFAULT_JOINT_POSITIONS)
+    robot = Articulation(robot_path)
+    robot.set_default_state(dof_positions=UR20_DEFAULT_JOINT_POSITIONS)
     return robot
+
+
+def _build_rmpflow_controller(
+    robot: Articulation, robot_path: str, exclude_obstacle_paths: list[str]
+) -> tuple[RmpFlowController, mg.WorldBinding]:
+    """Load the generated UR20 cuMotion config and wire up collision-aware RMPflow.
+
+    Args:
+        exclude_obstacle_paths: Prim paths to exclude from the obstacle set
+            scanned for collision avoidance - the robot itself and every box
+            that could ever be the pick/place target (a carried or
+            about-to-be-picked box must never register as an obstacle to
+            dodge, same as Isaac Sim's own cuMotion pick-and-place tutorial
+            excludes the cube it manipulates).
+    """
+    cumotion_robot = load_cumotion_robot(directory=UR20_CONFIG_DIR)
+    tool_frames = cumotion_robot.robot_description.tool_frame_names()
+    if TOOL_FRAME_NAME not in tool_frames:
+        raise RuntimeError(f"Expected tool frame '{TOOL_FRAME_NAME}' not found in generated XRDF: {tool_frames}")
+
+    robot_pos, robot_ori = robot.get_world_poses()
+    tracked_prims = mg.SceneQuery().get_prims_in_aabb(
+        search_box_origin=robot_pos.numpy()[0],
+        search_box_minimum=[-10.0, -10.0, -10.0],
+        search_box_maximum=[10.0, 10.0, 10.0],
+        tracked_api=mg.TrackableApi.PHYSICS_COLLISION,
+        exclude_prim_paths=exclude_obstacle_paths,
+    )
+
+    obstacle_strategy = mg.ObstacleStrategy()
+    for prim_type in (UsdGeom.Mesh, UsdGeom.Cone, UsdGeom.Cylinder):
+        obstacle_strategy.set_default_configuration(prim_type, mg.ObstacleConfiguration("obb", 0.01))
+
+    world_binding = mg.WorldBinding(
+        world_interface=CumotionWorldInterface(),
+        obstacle_strategy=obstacle_strategy,
+        tracked_prims=tracked_prims,
+        tracked_collision_api=mg.TrackableApi.PHYSICS_COLLISION,
+    )
+    world_binding.initialize()
+    world_binding.get_world_interface().update_world_to_robot_root_transforms(poses=(robot_pos, robot_ori))
+    world_binding.synchronize_transforms()
+
+    controller = RmpFlowController(
+        cumotion_robot=cumotion_robot,
+        cumotion_world_interface=world_binding.get_world_interface(),
+        robot_joint_space=list(robot.dof_names),
+        robot_site_space=tool_frames,
+        tool_frame=TOOL_FRAME_NAME,
+    )
+    return controller, world_binding
 
 
 class MagicAttachPickPlace:
@@ -145,15 +273,27 @@ class MagicAttachPickPlace:
 
     def __init__(
         self,
-        robot: UR10,
+        robot: Articulation,
+        robot_path: str,
         place_xy: tuple,
         place_belt_top_z: float,
         box_rigid_prims: dict,
+        physics_dt: float,
     ) -> None:
         self.robot = robot
         self.place_xy = place_xy
         self.place_belt_top_z = place_belt_top_z
         self.box_rigid_prims = box_rigid_prims
+        self._physics_dt = physics_dt
+
+        self.controller, self.world_binding = _build_rmpflow_controller(
+            robot, robot_path, exclude_obstacle_paths=[robot_path, *box_rigid_prims.keys()]
+        )
+        wrist_link_name, flange_subprim_name = TOOL_FRAME_LIVE_PRIM_SUBPATH.split("/")
+        link_names = list(robot.link_names)
+        wrist_link_path = robot.link_paths[0][link_names.index(wrist_link_name)]
+        self._tool_prim = GeomPrim(paths=f"{wrist_link_path}/{flange_subprim_name}")
+
         # Depends on which box is being carried (set per-cycle below, since
         # the two real boxes in the scene aren't necessarily the same size) -
         # box bottom flush on the belt means top-center (what the end
@@ -166,6 +306,7 @@ class MagicAttachPickPlace:
 
         self._phase = Phase.WAITING
         self._step = 0
+        self._t = 0.0
         self._pick_point: np.ndarray | None = None
         self._attach_offset: np.ndarray | None = None
         self._attach_orientation: np.ndarray | None = None
@@ -176,25 +317,70 @@ class MagicAttachPickPlace:
         center = position.numpy()[0]
         return center + np.array([0.0, 0.0, self._box_half_height])
 
-    def _advance(self, phase_name: str) -> bool:
-        """Increment the phase step counter; return True once the phase's duration elapses."""
+    def _tool_world_position(self) -> np.ndarray:
+        return self._tool_prim.get_world_poses()[0].numpy()[0]
+
+    def _estimated_state(self) -> "mg.RobotState":
+        names = list(self.robot.dof_names)
+        return mg.RobotState(
+            joints=mg.JointState.from_name(
+                robot_joint_space=names,
+                positions=(names, self.robot.get_dof_positions()),
+                velocities=(names, self.robot.get_dof_velocities()),
+            )
+        )
+
+    def _setpoint_state(self, target_position: np.ndarray) -> "mg.RobotState":
+        return mg.RobotState(
+            sites=mg.SpatialState.from_name(
+                spatial_space=[TOOL_FRAME_NAME],
+                positions=([TOOL_FRAME_NAME], wp.array([target_position.tolist()], dtype=wp.float32)),
+                orientations=([TOOL_FRAME_NAME], wp.array([DOWN_ORIENTATION.tolist()], dtype=wp.float32)),
+            ),
+        )
+
+    def _drive_to(self, target_position: np.ndarray, phase_name: str, reset_leg: bool) -> bool:
+        """Advance RMPflow toward target_position; return True once this phase should end.
+
+        Success-gated: requires both MIN_STEPS_PER_PHASE and the tool frame
+        landing within EE_POSITION_THRESHOLD of target_position: falls back
+        to PHASE_TICKS[phase_name] as a logged timeout otherwise.
+        """
+        if reset_leg and self._step == 0:
+            if not self.controller.reset(self._estimated_state(), self._setpoint_state(target_position), t=0.0):
+                raise RuntimeError(f"RmpFlowController.reset() failed entering {phase_name}")
+            self._t = 0.0
+
+        self.world_binding.get_world_interface().update_world_to_robot_root_transforms(
+            poses=self.robot.get_world_poses()
+        )
+        self.world_binding.synchronize_transforms()
+
+        desired = self.controller.forward(self._estimated_state(), self._setpoint_state(target_position), self._t)
+        if desired is not None and desired.joints.positions is not None:
+            self.robot.set_dof_position_targets(positions=desired.joints.positions, dof_indices=desired.joints.position_indices)
+
+        self._t += self._physics_dt
         self._step += 1
-        if self._step >= PHASE_TICKS[phase_name]:
+
+        converged = self._step >= MIN_STEPS_PER_PHASE and float(
+            np.linalg.norm(self._tool_world_position() - target_position)
+        ) < EE_POSITION_THRESHOLD
+        timed_out = self._step >= PHASE_TICKS[phase_name]
+        if timed_out and not converged:
+            print(f"[pick_and_place] {phase_name} timed out after {PHASE_TICKS[phase_name]} ticks without converging", flush=True)
+        if converged or timed_out:
             self._step = 0
             return True
         return False
 
     def forward(self, pick_ready: bool, box_path: str | None) -> None:
-        goal_orientation = self.robot.get_downward_orientation()
-        _, current_ee_position, _ = self.robot.get_current_state()
-        current_ee_position = current_ee_position[0]
-
         # While holding the box, keep it rigidly offset from the end effector -
         # read BEFORE issuing this tick's motion command so it tracks the
         # actually-reached pose rather than lagging the aspirational target.
         if self._phase in (Phase.LIFT, Phase.MOVE_ABOVE_PLACE, Phase.DESCEND_TO_PLACE):
             self.box.set_world_poses(
-                positions=current_ee_position + self._attach_offset,
+                positions=self._tool_world_position() + self._attach_offset,
                 orientations=self._attach_orientation,
             )
 
@@ -213,6 +399,12 @@ class MagicAttachPickPlace:
                 self.box = candidate_box
                 self._box_half_height = measure_box_half_height(box_path)
                 self._pick_point = self._box_top_center()
+                # Disable the box's rigid body NOW, not at ATTACH - it must
+                # never be physically contactable by the approaching arm
+                # (see module docstring: this is what fixed the ~0.34 m
+                # attach-offset bug). It stays a frozen kinematic body,
+                # exactly at _pick_point, all the way through ATTACH.
+                self.box.set_enabled_rigid_bodies([False])
                 print(
                     f"[pick_and_place] DEBUG WAITING->MOVE_ABOVE_PICK: box_path={box_path} "
                     f"pick_point={self._pick_point} box_half_height={self._box_half_height} settled_speed={speed}",
@@ -228,15 +420,13 @@ class MagicAttachPickPlace:
 
         elif self._phase == Phase.MOVE_ABOVE_PICK:
             goal = self._pick_point + np.array([0.0, 0.0, APPROACH_HEIGHT])
-            self.robot.set_end_effector_pose(position=goal, orientation=goal_orientation, ik_method=IK_METHOD)
-            if self._advance("MOVE_ABOVE_PICK"):
+            if self._drive_to(goal, "MOVE_ABOVE_PICK", reset_leg="MOVE_ABOVE_PICK" in RESET_ON_ENTRY_PHASES):
                 self._phase = Phase.DESCEND_TO_PICK
 
         elif self._phase == Phase.DESCEND_TO_PICK:
-            self.robot.set_end_effector_pose(position=self._pick_point, orientation=goal_orientation, ik_method=IK_METHOD)
-            if self._advance("DESCEND_TO_PICK"):
+            if self._drive_to(self._pick_point, "DESCEND_TO_PICK", reset_leg=False):
                 print(
-                    f"[pick_and_place] DEBUG DESCEND_TO_PICK end: ee_pos={current_ee_position} "
+                    f"[pick_and_place] DEBUG DESCEND_TO_PICK end: ee_pos={self._tool_world_position()} "
                     f"pick_point={self._pick_point} box={self.box.paths}",
                     flush=True,
                 )
@@ -245,35 +435,33 @@ class MagicAttachPickPlace:
         elif self._phase == Phase.ATTACH:
             if self._step == 0:
                 box_position, box_orientation = self.box.get_world_poses()
-                self._attach_offset = box_position.numpy()[0] - current_ee_position
+                self._attach_offset = box_position.numpy()[0] - self._tool_world_position()
                 self._attach_orientation = box_orientation.numpy()[0]
                 print(
-                    f"[pick_and_place] DEBUG ATTACH: ee_pos={current_ee_position} "
+                    f"[pick_and_place] DEBUG ATTACH: ee_pos={self._tool_world_position()} "
                     f"box_pos={box_position.numpy()[0]} attach_offset={self._attach_offset}",
                     flush=True,
                 )
-                self.box.set_enabled_rigid_bodies([False])
-            if self._advance("ATTACH"):
+            self._step += 1
+            if self._step >= PHASE_TICKS["ATTACH"]:
+                self._step = 0
                 self._phase = Phase.LIFT
 
         elif self._phase == Phase.LIFT:
             goal = self._pick_point + np.array([0.0, 0.0, APPROACH_HEIGHT])
-            self.robot.set_end_effector_pose(position=goal, orientation=goal_orientation, ik_method=IK_METHOD)
-            if self._advance("LIFT"):
+            if self._drive_to(goal, "LIFT", reset_leg="LIFT" in RESET_ON_ENTRY_PHASES):
                 self._phase = Phase.MOVE_ABOVE_PLACE
 
         elif self._phase == Phase.MOVE_ABOVE_PLACE:
             goal = self.place_position + np.array([0.0, 0.0, APPROACH_HEIGHT])
-            self.robot.set_end_effector_pose(position=goal, orientation=goal_orientation, ik_method=IK_METHOD)
             if self._step == 0:
-                print(f"[pick_and_place] DEBUG MOVE_ABOVE_PLACE start: ee_pos={current_ee_position} goal={goal}", flush=True)
-            if self._advance("MOVE_ABOVE_PLACE"):
-                print(f"[pick_and_place] DEBUG MOVE_ABOVE_PLACE end: ee_pos={current_ee_position} goal={goal}", flush=True)
+                print(f"[pick_and_place] DEBUG MOVE_ABOVE_PLACE start: ee_pos={self._tool_world_position()} goal={goal}", flush=True)
+            if self._drive_to(goal, "MOVE_ABOVE_PLACE", reset_leg=False):
+                print(f"[pick_and_place] DEBUG MOVE_ABOVE_PLACE end: ee_pos={self._tool_world_position()} goal={goal}", flush=True)
                 self._phase = Phase.DESCEND_TO_PLACE
 
         elif self._phase == Phase.DESCEND_TO_PLACE:
-            self.robot.set_end_effector_pose(position=self.place_position, orientation=goal_orientation, ik_method=IK_METHOD)
-            if self._advance("DESCEND_TO_PLACE"):
+            if self._drive_to(self.place_position, "DESCEND_TO_PLACE", reset_leg=False):
                 self._phase = Phase.DETACH
 
         elif self._phase == Phase.DETACH:
@@ -281,18 +469,19 @@ class MagicAttachPickPlace:
                 box_pos_before, _ = self.box.get_world_poses()
                 print(
                     f"[pick_and_place] DEBUG detaching: box_pos={box_pos_before.numpy()[0]} "
-                    f"ee_pos={current_ee_position} place_target={self.place_position} "
+                    f"ee_pos={self._tool_world_position()} place_target={self.place_position} "
                     f"attach_offset={self._attach_offset}",
                     flush=True,
                 )
                 self.box.set_enabled_rigid_bodies([True])
-            if self._advance("DETACH"):
+            self._step += 1
+            if self._step >= PHASE_TICKS["DETACH"]:
+                self._step = 0
                 self._phase = Phase.RETRACT
 
         elif self._phase == Phase.RETRACT:
             goal = self.place_position + np.array([0.0, 0.0, APPROACH_HEIGHT])
-            self.robot.set_end_effector_pose(position=goal, orientation=goal_orientation, ik_method=IK_METHOD)
-            if self._advance("RETRACT"):
+            if self._drive_to(goal, "RETRACT", reset_leg="RETRACT" in RESET_ON_ENTRY_PHASES):
                 self._phase = Phase.WAITING
 
     @property
