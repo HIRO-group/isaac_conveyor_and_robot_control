@@ -1,0 +1,31 @@
+// Sim-only schema for the conveyor indexing action space.
+//
+// This mirrors the shape of theia's real per-conveyor commands
+// (CmdConveyorsNRun / CmdConveyorsNSpeed / CmdConveyorsNDirection in
+// plc-connector.proto), collapsed into one repeated message so a full
+// per-tick action can be logged as a single bytes column, the same way
+// plc_state_conveyors bundles all StateConveyors_ConveyorsItem entries.
+//
+// `direction` intentionally stays a raw sint32 (not a proto enum), because
+// that's what the real Direction field is on the wire (see
+// plc-connector.proto: `sint32 Direction = 6;`). Convention, per
+// ~/theia/docs/PLC/UDT.md: 0 = Undefined, 1 = Forward, 2 = Reverse.
+//
+// This file is NOT part of theia's production schema - it lives here so the
+// sim's action log is schema-*compatible* with production without touching
+// theia's real proto files.
+syntax = "proto3";
+
+package theia.sim.conveyor_indexing.v1;
+
+message SimConveyorCommand {
+  int32 zone_index = 1;
+  string conveyor_node_path = 2;
+  bool run = 3;
+  sint32 speed = 4;
+  sint32 direction = 5;
+}
+
+message SimConveyorCommands {
+  repeated SimConveyorCommand commands = 1;
+}
