@@ -2,13 +2,13 @@ format: "xrdf"
 
 format_version: 2.0
 
-default_joint_positions: 
-  shoulder_pan_joint: -1.57
-  shoulder_lift_joint: -1.57
-  elbow_joint: -1.57
-  wrist_1_joint: -1.57
-  wrist_2_joint: 1.57
-  wrist_3_joint: 0.0
+default_joint_positions:
+  shoulder_pan_joint: 2.583766
+  shoulder_lift_joint: -0.523898
+  elbow_joint: -0.007470
+  wrist_1_joint: -0.872193
+  wrist_2_joint: 1.125949
+  wrist_3_joint: 0.148515
 
 cspace: 
   joint_names: 

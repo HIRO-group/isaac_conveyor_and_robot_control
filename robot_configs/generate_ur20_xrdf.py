@@ -54,19 +54,23 @@ ARM_JOINT_NAMES = [
     "wrist_3_joint",
 ]
 
-# Same bent-elbow seed pose as the bundled UR10 config's own
-# default_joint_positions (robot_configurations/ur10/robot.xrdf) - the
-# articulation's raw rest pose (all ~0 rad) is a stretched/singular UR
-# configuration, same convention issue UR10's own config was already
-# authored to avoid. Reused here rather than left at the raw rest pose,
-# since it's the same joint order/family, not a fabricated guess.
+# "Ready" home pose: tool0 directly above the robot's own base with the
+# same DOWN_ORIENTATION used for pick/place targets (see
+# pick_and_place.py's UR20_DEFAULT_JOINT_POSITIONS for the full derivation -
+# converged via RmpFlowController against that target in an empty scene, not
+# hand-picked). UR10's own bundled bent-elbow seed was tried first and
+# empirically found to leave the flange's Z axis pointing horizontally
+# rather than down, forcing a large simultaneous reorientation + long
+# translation from a cold start on every pick/place cycle - this value must
+# stay in sync with pick_and_place.py's copy (both describe the same
+# physical "ready" configuration).
 DEFAULT_JOINT_POSITIONS_RAD = {
-    "shoulder_pan_joint": -1.57,
-    "shoulder_lift_joint": -1.57,
-    "elbow_joint": -1.57,
-    "wrist_1_joint": -1.57,
-    "wrist_2_joint": 1.57,
-    "wrist_3_joint": 0.0,
+    "shoulder_pan_joint": 2.583766,
+    "shoulder_lift_joint": -0.523898,
+    "elbow_joint": -0.007470,
+    "wrist_1_joint": -0.872193,
+    "wrist_2_joint": 1.125949,
+    "wrist_3_joint": 0.148515,
 }
 
 # base_link and wrist_3_link deliberately have no entry here - they're
