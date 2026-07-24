@@ -9,6 +9,11 @@ to move a single item through a zone under normal conditions are implemented:
           -> IDLE (holding, occupied, downstream busy)
           -> ADVANCE_ITEM -> PASSTHROUGH -> EMPTY (loop)
 
+INDUCTING keeps running past first-occupied until ``at_stop_position`` is
+also true (see ``step()``), so a zone with a defined stop point (e.g. a
+hold zone's geometric center) settles the part there before reporting IDLE,
+rather than wherever it first entered the occupancy sensor.
+
 The exception/reject states (WAITING_TO_REJECT, REJECT_SINGLE, REJECT_STUCK,
 REJECT_FULL, REJECT_SPUR, SHIFTED_ITEM, PLACE_UNEXPECTED_ITEM, PURGE,
 AWAITING_DECISION, CLEAR_FOR_PLACE, READY_FOR_PLACEMENT) are NOT implemented.
@@ -90,6 +95,7 @@ class ConveyorZoneStateMachine:
         occupied: bool,
         upstream_occupied: bool,
         downstream_clear: bool,
+        at_stop_position: bool = True,
     ) -> tuple[ZoneObservation, ZoneCommand]:
         """Advance the zone's state machine by one control tick.
 
@@ -104,6 +110,13 @@ class ConveyorZoneStateMachine:
                 accept a handoff (unoccupied). For the last zone in a line,
                 this should be True (handing off to an outfeed outside the
                 modeled system).
+            at_stop_position: Whether the occupying part has reached this
+                zone's designated stop point (e.g. a hold zone's geometric
+                center, for a fixed, robot-reachable pick position) rather
+                than merely anywhere inside the zone's occupancy sensor.
+                Defaults to True, which reproduces the previous behavior
+                (stop as soon as occupied) for every zone that doesn't
+                define a specific stop point.
 
         Returns:
             A tuple of (observation, command) for this tick - the observation
@@ -140,7 +153,12 @@ class ConveyorZoneStateMachine:
                 self._handshake_ticks_remaining -= 1
 
         elif s == Machine.CONVEYOR_STATE_MACHINE_INDUCTING:
-            if occupied:
+            # Keeps running (INDUCTING stays a "running" state below) past
+            # first-occupied until the part reaches its designated stop
+            # position - e.g. a hold zone's geometric center, so a fixed,
+            # robot-reachable pick point is reached instead of wherever the
+            # part happened to enter the zone's occupancy sensor.
+            if occupied and at_stop_position:
                 self._state = Machine.CONVEYOR_STATE_MACHINE_IDLE
 
         elif s == Machine.CONVEYOR_STATE_MACHINE_IDLE:

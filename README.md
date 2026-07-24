@@ -1,18 +1,59 @@
 # Conveyor indexing (sim)
 
 Zone-accumulation indexing controller for the inbuilt surface-velocity
-conveyors in `~/conveyor_setup.usd` (two closed loops), with per-tick data
-logging designed for later imitation learning and reinforcement learning on
-the indexing policy, plus a UR20 (driven by NVIDIA cuMotion RMPflow) that
-picks a box off loop 1 and places it on loop 2 using magic attach (no real
-grasp physics).
+conveyors in `~/5_conv_env.usd` (two short, OPEN/non-looping lines), with
+per-tick data logging designed for later imitation learning and
+reinforcement learning on the indexing policy, plus a UR20 (driven by
+NVIDIA cuMotion) that picks a box off loop 1 and places it on loop 2 using
+magic attach (no real grasp physics), where the belt then carries it off the
+far end into a waiting truck.
+
+## Environment
+
+`conveyor_indexer.py`'s `STAGE_PATH` currently points at
+`/home/ubuntu/5_conv_env.usd`, a smaller, purpose-built scene distinct from
+the two earlier ones this repo was originally developed against
+(`conveyor_setup.usd`, then `racetrack.usd` - see "Known gaps" below for
+that history, most of which describes those older scenes, not this one):
+
+- **Two open (non-looping) lines**, not closed ovals: loop 1
+  (`ConveyorTrack`/`_01`/`_02`, along Y=0) and loop 2 (`ConveyorTrack_09`/
+  `_10`, along Y~2.186), both straight-only (no curved zones) and spanning
+  the same X range. `ConveyorLineController` supports both a closed loop
+  (modulo-wrapped neighbor indices, for the older scenes) and an open line
+  (`closed_loop=False`, the default and what's used here) - the first zone's
+  upstream and the last zone's downstream are treated as always
+  available/clear rather than wrapping around.
+- **Boxes ship pre-authored in the scene**: ~18-19 `CubeBox_*` prims already
+  sit stacked (two layers) directly on `ConveyorTrack`'s belt - unlike
+  `racetrack.usd`, which shipped with no boxes and needed them referenced in
+  at runtime. They're pure visual payloads with no physics schemas at all;
+  `conveyor_indexer.py` discovers them (`_discover_box_prim_paths`) and adds
+  `RigidBodyAPI` + convex-hull `CollisionAPI` + an estimated mass at runtime
+  (`_apply_box_physics`), the same "don't edit the source USD" convention
+  already used for `_deactivate_frame_meshes`.
+- **A `SteelBoxTruck_A01_01` sits at loop 2's far end**: its bed is ~0.83 m
+  below belt-top height, right past `ConveyorTrack_10`'s end, so a box that
+  rides loop 2 to completion runs off the belt and drops into the truck bed.
+  Like the boxes, the truck ships as a pure visual payload -
+  `_apply_truck_collision` adds a static collider to its body mesh so boxes
+  actually land in it instead of clipping through.
+- **Pick/place geometry fits a UR20 without any runtime repositioning**:
+  `ConveyorTrack_01` (loop 1 pick zone) and `ConveyorTrack_09` (loop 2 place
+  zone) are both centered at local X=-3; a robot at the Y midpoint between
+  the two loops' near edges reaches each at ~1.09 m, comfortably inside the
+  UR20's 1.75 m spec reach.
+- **Referenced assets are fetched from the public Omniverse S3 content
+  bucket over HTTPS** (the conveyor belt asset, the truck, and the 3 box
+  variants) - every stage open re-downloads them unless localized. See
+  "Setup" for caching them locally.
 
 ## Design
 
-- **Two independent closed loops**: `ConveyorTrack`.._07` (loop 1) and
-  `ConveyorTrack_08`.._15` (loop 2, added later, offset +Y). Each is driven by
-  its own `ConveyorLineController` with its own modulo-wrapped neighbor
-  wiring - they don't interact except via the robot.
+- **Two independent lines**: see "Environment" above for 5_conv_env.usd's
+  specific zone layout; `ConveyorLineController` (with its own
+  neighbor-occupancy wiring) is shared code for both open lines here and the
+  closed loops in the older `conveyor_setup.usd`/`racetrack.usd` scenes.
 - **Actuation**: each generated belt segment has its own tiny ActionGraph
   (`OnTick -> ConveyorNode`, see `create_conveyor_belt()` in
   `isaacsim.asset.gen.conveyor`). `ConveyorNode.inputs:enabled` is a plain,
@@ -23,7 +64,7 @@ grasp physics).
 - **Occupancy sensing**: a PhysX box-overlap query (`overlap_box`) against
   each zone's belt bounding box, computed once at startup (belts are static).
   Hits whose rigid body path falls under a known `/World/ConveyorTrack*`,
-  robot, or pedestal root are structure, not items, and are excluded.
+  robot, pedestal, or truck root are structure, not items, and are excluded.
 - **Indexing logic**: `conveyor_state_machine.py` implements a best-effort
   "happy path" subset of the real `ConveyorStateMachineCode` enum from
   `~/theia/proto/plc-connector/plc-connector.proto` - see that module's
@@ -48,7 +89,13 @@ grasp physics).
   an arriving box is held stopped in front of the robot instead of
   auto-advancing, and only "starves" (lets the next box advance in) once the
   robot's magic-attach has moved the box away and occupancy clears. See
-  `PICK_ZONE_INDEX`/`hold_zone_indices` in `conveyor_indexer.py`.
+  `PICK_ZONE_INDEX`/`hold_zone_indices` in `conveyor_indexer.py`. The hold
+  zone also keeps running past first-occupied until the box reaches the
+  zone's geometric center (`ConveyorZone.is_past_center`, gated via
+  `ConveyorZoneStateMachine.step`'s `at_stop_position` argument) rather than
+  stopping wherever it first entered the occupancy sensor - the robot needs
+  a fixed, reachable pick point every cycle, not one that drifts with
+  however far the box carried into the zone before the belt cut out.
 - **Data schema**: chosen to match theia's real production schema so sim data
   is directly comparable/mergeable with real collected data, without
   depending on a live Zenoh session (see "Integration depth" below).
@@ -161,7 +208,14 @@ session; `setsid`/`nohup`/`disown` together fully detach it).
   checking only the top prim (which is what an earlier pass here did). Both
   drive real `Machine` state transitions in the logged data, and having two
   boxes is what actually exercises the hold-zone/starvation behavior across
-  more than one cycle in a single run.
+  more than one cycle in a single run. (Describes `conveyor_setup.usd`; see
+  "Environment" above for `5_conv_env.usd`'s own pre-authored box pallet.)
+- **Box mass in `5_conv_env.usd` is an estimate, not a measured value.**
+  `_apply_box_physics`'s `BOX_DENSITY_KG_PER_M3` (150 kg/m^3, applied to each
+  box's own bbox volume) is a plausible ballpark for a lightly-packed
+  shipping box, chosen because the scene doesn't author a mass for these at
+  all. Revisit if carried-box dynamics (settling time, how the belt handles
+  it, cuMotion's grasp) look off.
 - ~~Stray `/World/ConveyorBeltGraph/ConveyorNode` targets `/World/DistantLight`~~
   **Worked around at runtime, not fixed in the scene file**:
   `create_conveyor_belt()` walks up looking for a `RigidBodyAPI` ancestor and,

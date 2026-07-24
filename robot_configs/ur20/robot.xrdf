@@ -2,13 +2,13 @@ format: "xrdf"
 
 format_version: 2.0
 
-default_joint_positions:
-  shoulder_pan_joint: 2.583766
-  shoulder_lift_joint: -0.523898
-  elbow_joint: -0.007470
-  wrist_1_joint: -0.872193
-  wrist_2_joint: 1.125949
-  wrist_3_joint: 0.148515
+default_joint_positions: 
+  shoulder_pan_joint: 2.5838
+  shoulder_lift_joint: -0.5239
+  elbow_joint: -0.0075
+  wrist_1_joint: -0.8722
+  wrist_2_joint: 1.1259
+  wrist_3_joint: 0.1485
 
 cspace: 
   joint_names: 
@@ -47,67 +47,83 @@ geometry:
   auto_generated_collision_sphere_group: 
     spheres: 
       shoulder_link: 
-        - center: [-0.001, 0.04, -0.006]
-          radius: 0.1318
-        - center: [0.016, 0.003, -0.055]
-          radius: 0.0985
-        - center: [-0.005, -0.003, -0.064]
-          radius: 0.1171
-        - center: [-0.066, 0.117, 0.012]
-          radius: 0.0345
+        - center: [-0.001, 0.025, -0.022]
+          radius: 0.0897
+        - center: [0.001, -0.0, -0.039]
+          radius: 0.089
       upper_arm_link: 
-        - center: [0.009, -0.003, 0.474]
-          radius: 0.1503
-        - center: [-0.009, 0.006, 0.234]
-          radius: 0.1407
-        - center: [0.007, -0.061, 0.847]
-          radius: 0.1243
-        - center: [-0.001, 0.025, 0.87]
-          radius: 0.0762
-        - center: [-0.027, -0.117, 0.92]
-          radius: 0.0178
-        - center: [-0.026, 0.033, 0.778]
-          radius: 0.0649
-        - center: [0.029, 0.053, -0.063]
-          radius: 0.0161
-        - center: [0.005, 0.019, 0.661]
-          radius: 0.1159
-      forearm_link: 
-        - center: [-0.004, 0.007, 0.385]
-          radius: 0.0803
-        - center: [0.006, -0.001, 0.19]
-          radius: 0.1002
-        - center: [0.003, 0.001, 0.508]
-          radius: 0.0684
-        - center: [0.005, 0.004, 0.297]
+        - center: [0.0, -0.002, 0.226]
+          radius: 0.0877
+        - center: [0.0, -0.002, 0.428]
+          radius: 0.0825
+        - center: [0.001, -0.002, 0.603]
+          radius: 0.0783
+        - center: [-0.007, -0.044, 0.841]
+          radius: 0.0679
+        - center: [0.017, -0.064, 0.063]
+          radius: 0.0642
+        - center: [0.001, -0.001, 0.351]
           radius: 0.0835
-        - center: [0.003, -0.0, 0.6]
-          radius: 0.0712
-        - center: [-0.049, 0.008, 0.671]
-          radius: 0.0188
-        - center: [-0.006, 0.051, 0.668]
-          radius: 0.0165
-        - center: [-0.005, -0.006, 0.453]
-          radius: 0.0821
-        - center: [0.067, -0.032, 0.111]
-          radius: 0.0089
-        - center: [-0.037, -0.008, 0.351]
-          radius: 0.0165
+        - center: [0.001, -0.002, 0.648]
+          radius: 0.0773
+        - center: [0.003, -0.004, 0.52]
+          radius: 0.0778
+        - center: [-0.02, -0.047, 0.071]
+          radius: 0.0585
+        - center: [0.003, 0.018, 0.701]
+          radius: 0.0559
+        - center: [-0.035, -0.082, 0.033]
+          radius: 0.048
+        - center: [0.053, -0.031, -0.026]
+          radius: 0.0297
+      forearm_link: 
+        - center: [0.0, -0.0, 0.244]
+          radius: 0.0687
+        - center: [0.001, 0.0, 0.368]
+          radius: 0.0626
+        - center: [-0.002, 0.001, 0.478]
+          radius: 0.0557
+        - center: [-0.005, -0.015, 0.163]
+          radius: 0.0574
+        - center: [0.003, -0.003, 0.604]
+          radius: 0.0479
+        - center: [0.015, 0.042, 0.041]
+          radius: 0.047
+        - center: [-0.003, 0.028, 0.715]
+          radius: 0.047
+        - center: [0.0, 0.0, 0.323]
+          radius: 0.0652
+        - center: [-0.001, 0.001, 0.558]
+          radius: 0.0531
+        - center: [0.008, 0.02, 0.157]
+          radius: 0.0513
+        - center: [-0.04, 0.038, 0.056]
+          radius: 0.0331
+        - center: [-0.046, -0.013, 0.003]
+          radius: 0.0244
+        - center: [0.001, 0.001, 0.435]
+          radius: 0.0591
+        - center: [-0.036, 0.058, 0.01]
+          radius: 0.0296
+        - center: [0.048, -0.013, 0.007]
+          radius: 0.0227
       wrist_1_link: 
-        - center: [-0.003, 0.056, 0.002]
-          radius: 0.0813
-        - center: [0.0, 0.077, 0.048]
-          radius: 0.0632
+        - center: [0.0, 0.07, 0.009]
+          radius: 0.0497
+        - center: [0.0, 0.05, 0.033]
+          radius: 0.0497
       wrist_2_link: 
-        - center: [0.001, 0.005, 0.053]
-          radius: 0.075
-        - center: [0.0, 0.049, 0.073]
-          radius: 0.0636
-        - center: [-0.023, -0.034, 0.024]
-          radius: 0.024
-        - center: [0.04, -0.038, 0.029]
-          radius: 0.0197
-        - center: [-0.021, 0.063, 0.025]
-          radius: 0.022
-        - center: [-0.039, -0.024, 0.105]
-          radius: 0.0057
+        - center: [-0.0, 0.022, 0.068]
+          radius: 0.0501
+        - center: [-0.001, 0.005, 0.051]
+          radius: 0.0485
+        - center: [0.003, 0.036, 0.048]
+          radius: 0.0468
+        - center: [0.004, 0.04, 0.08]
+          radius: 0.0436
+        - center: [-0.0, 0.016, 0.074]
+          radius: 0.0501
+        - center: [0.014, -0.012, 0.037]
+          radius: 0.0362
+        - center: [-0.012, -0.016, 0.035]
+          radius: 0.0354
