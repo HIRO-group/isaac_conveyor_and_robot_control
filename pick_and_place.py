@@ -1,65 +1,44 @@
-"""Magic-attach pick-and-place: UR20 moves a box from a pick-zone conveyor to a
-place-zone conveyor on another loop, driven by NVIDIA cuMotion's
-GraphBasedMotionPlanner (isaacsim.robot_motion.cumotion) rather than raw
-per-tick differential IK or a reactive controller - collision-aware motion
-instead of a stateless one-shot IK solve every physics tick (see README's
-"Known gaps" history for why that mattered: the previous UR10 + raw-IK
-version produced visibly jerky motion and let the approaching arm physically
-shove the box out of place before "attaching" it).
+"""Magic-attach pick-and-place (parent side): UR20 moves a box from a pick-zone
+conveyor to a place-zone conveyor on another loop, using collision-aware
+NVIDIA cuMotion motion planning.
+
+The cuMotion solve itself runs OUT OF PROCESS (see planner_server.py /
+planner_server_impl.py) because a single solve is a monolithic C++/CUDA call
+that holds the Python GIL for its whole duration - running it in this process
+froze the main sim loop until it returned. This module is the parent side: it
+owns the pick/place phase state machine, ships each plan request to the planner
+subprocess via PlannerClient, and plays back the sampled trajectory the
+subprocess returns - without blocking, so the main loop keeps stepping every
+robot and conveyor while a plan is being computed. It imports no cuMotion.
 """
 
 from __future__ import annotations
 
 import math
-import os
-import re
+from collections.abc import Callable
 from enum import IntEnum
 
-import cumotion
 import numpy as np
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 from scipy.spatial.transform import Rotation
 
 import isaacsim.core.experimental.utils.stage as stage_utils
 import isaacsim.core.experimental.utils.xform as xform_utils
-import isaacsim.robot_motion.experimental.motion_generation as mg
-from isaacsim.core.experimental.objects import Cone, Cylinder, Mesh
+from isaacsim.core.experimental.objects import Cylinder
 from isaacsim.core.experimental.prims import Articulation, GeomPrim, RigidPrim
-from isaacsim.robot_motion.cumotion import (
-    CumotionRobot,
-    CumotionWorldInterface,
-    GraphBasedMotionPlanner,
-    load_cumotion_robot,
-)
-
-from isaacsim.robot_motion.cumotion.impl.utils import isaac_sim_to_cumotion_pose
 from isaacsim.storage.native import get_assets_root_path
 
-# isaacsim.robot_motion.cumotion's shipped code calls np.reshape(arr,
-# shape=[...]) - the `shape=` keyword only exists from NumPy 2.1 onward, but
-# this Isaac Sim install's bundled NumPy is 1.26.4, so every such call raises
-# TypeError. Patched here, in this process only (never touches the shared
-# Isaac Sim installation), rather than editing the vendored file. Must
-# capture the real np.reshape BEFORE reassigning np.reshape below - calling
-# `np.reshape` from inside the wrapper itself (instead of this captured
-# reference) recurses infinitely, since by then `np.reshape` IS this wrapper
-# (confirmed: this exact mistake was in place here and crashed with
-# `RecursionError` on the very first obstacle add call).
-_np_reshape = np.reshape
+# Collision-aware motion planning (cuMotion) now runs OUT OF PROCESS in a
+# dedicated headless planner subprocess (see planner_server.py /
+# planner_server_impl.py) - a single cuMotion solve is a monolithic C++/CUDA
+# call that holds the Python GIL for its whole duration, so running it in this
+# process (even on a worker thread) froze the main sim loop until it returned.
+# This module is now the PARENT side: it owns the pick/place state machine and
+# plays back the trajectories the subprocess computes, and imports NO cuMotion
+# at all. MagicAttachPickPlace ships each plan request to the subprocess via
+# PlannerClient and polls for the result without blocking, so the main loop
+# keeps stepping every robot and conveyor while a plan is being computed.
 
-
-def _reshape_shape_kwarg_compat(a, *args, **kwargs):
-    if "shape" in kwargs:
-        kwargs["newshape"] = kwargs.pop("shape")
-    return _np_reshape(a, *args, **kwargs)
-
-
-np.reshape = _reshape_shape_kwarg_compat
-
-_DEBUG_DISABLE_OBSTACLE_TRACKING = False
-
-UR20_CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "robot_configs", "ur20")
-TOOL_FRAME_NAME = "tool0"
 TOOL_FRAME_LIVE_PRIM_SUBPATH = "wrist_3_link/flange"
 UR20_DEFAULT_JOINT_POSITIONS = [1.5708, -1.5708, -1.5708, -1.5708, 1.5708, 3.1415]
 UR20_PRE_PLACE_JOINT_POSITIONS = [-1.5708, -1.5708, -1.5708, -1.5708, 1.5708, 3.1415]
@@ -150,10 +129,22 @@ PHASE_TICKS = {
     "DESCEND_TO_PLACE": 1000,
 }
 
-MAX_JOINT_VELOCITIES = [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
-MAX_JOINT_ACCELERATIONS = [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
 PLANNING_RETRIES = 3
-IK_CSPACE_LIMIT_BIASING_WEIGHT = 1.0  # relative weight; see IkConfig docs
+
+# Ticks to pause before re-requesting a plan whose target isn't recoverable by
+# nudging a conveyor (STAGE_FOR_PICK/STAGE_FOR_PLACE/DESCEND_TO_PLACE) - avoids
+# hammering the planner subprocess every physics tick on a target that just
+# keeps failing.
+REPLAN_COOLDOWN_TICKS = 60
+
+
+class PlanningFailedError(RuntimeError):
+    """Raised by _drive_to once PLANNING_RETRIES plan requests all come back
+    failed from the planner subprocess.
+
+    Caught in forward() - a planning failure must never propagate out of
+    forward() and crash the whole simulation app (see main()'s loop).
+    """
 
 
 class Phase(IntEnum):
@@ -214,124 +205,106 @@ def create_pedestal_and_robot(
     return robot
 
 
-def _build_motion_planner(
-    robot: Articulation, robot_path: str, exclude_obstacle_paths: list[str]
-) -> tuple[GraphBasedMotionPlanner, mg.WorldBinding, CumotionRobot]:
-    """Load the generated UR20 cuMotion config and wire up a collision-aware GraphBasedMotionPlanner.
+class PlannerClient:
+    """Parent-side handle to the out-of-process cuMotion planner.
 
-    Args:
-        exclude_obstacle_paths: Prim paths to exclude from the obstacle set
-            scanned for collision avoidance - the robot itself and every box
-            that could ever be the pick/place target (a carried or
-            about-to-be-picked box must never register as an obstacle to
-            dodge, same as Isaac Sim's own cuMotion pick-and-place tutorial
-            excludes the cube it manipulates).
+    Wraps the full-duplex ``multiprocessing.connection`` to the planner
+    subprocess (see planner_server.py). Shared by every MagicAttachPickPlace on
+    this line - each tags its requests with a ``robot_id`` so results route
+    back to the right one. The main loop calls ``pump()`` once per physics tick
+    to drain whatever results have arrived; each robot then calls ``take()``.
+
+    Tolerant of the subprocess dying: once the connection breaks, ``pump()``
+    marks the client dead, ``submit()`` becomes a no-op, and ``take()`` returns
+    None forever - so the arms simply hold their pose and the rest of the sim
+    (conveyors, logging) keeps running, rather than crashing.
     """
-    cumotion_robot = load_cumotion_robot(directory=UR20_CONFIG_DIR)
-    tool_frames = cumotion_robot.robot_description.tool_frame_names()
-    if TOOL_FRAME_NAME not in tool_frames:
-        raise RuntimeError(f"Expected tool frame '{TOOL_FRAME_NAME}' not found in generated XRDF: {tool_frames}")
 
-    robot_pos, robot_ori = robot.get_world_poses()
-    
-    obstacle_strategy = mg.ObstacleStrategy()
-    obstacle_strategy.set_default_configuration(Mesh, mg.ObstacleConfiguration("triangulated_mesh", 0.005))
-    obstacle_strategy.set_default_configuration(Cone, mg.ObstacleConfiguration("obb", 0.0))
-    obstacle_strategy.set_default_configuration(Cylinder, mg.ObstacleConfiguration("obb", 0.0))
-    exclude_paths = list(exclude_obstacle_paths)
-    max_attempts = 40
+    def __init__(self, conn) -> None:
+        self._conn = conn
+        self._next_id = 1
+        self._results: dict[int, dict] = {}  # robot_id -> latest result message
+        self._alive = True
 
-    # Isaac Sim bug workaround (filed upstream, not fixed as of this writing):
-    # WorldBinding.initialize() wraps every tracked Mesh-type obstacle in an
-    # isaacsim.core.experimental.objects.Mesh (world_binding.py's
-    # _add_mesh_from_prim/_add_triangulated_mesh_from_prim), and that class
-    # defaults reset_xform_op_properties=True. reset_xform_op_properties()
-    # deletes xformOp:rotateXYZ
-    rotation_guard_paths = (
-        []
-        if _DEBUG_DISABLE_OBSTACLE_TRACKING
-        else mg.SceneQuery().get_prims_in_aabb(
-            search_box_origin=robot_pos.numpy()[0],
-            search_box_minimum=[-10.0, -10.0, -10.0],
-            search_box_maximum=[10.0, 10.0, 10.0],
-            tracked_api=mg.TrackableApi.PHYSICS_COLLISION,
-            exclude_prim_paths=exclude_paths,
-        )
-    )
-    stage = stage_utils.get_current_stage()
-    rotation_guard_snapshot = {}
-    for guard_path in rotation_guard_paths:
-        local_matrix = UsdGeom.Xformable(stage.GetPrimAtPath(guard_path)).GetLocalTransformation(Usd.TimeCode.Default())
-        rotation_guard_snapshot[guard_path] = Gf.Transform(local_matrix).GetRotation().GetQuat()
+    @property
+    def alive(self) -> bool:
+        return self._alive
 
-    try:
-        for attempt in range(max_attempts):
-            tracked_prims = (
-                []
-                if _DEBUG_DISABLE_OBSTACLE_TRACKING
-                else mg.SceneQuery().get_prims_in_aabb(
-                    search_box_origin=robot_pos.numpy()[0],
-                    search_box_minimum=[-10.0, -10.0, -10.0],
-                    search_box_maximum=[10.0, 10.0, 10.0],
-                    tracked_api=mg.TrackableApi.PHYSICS_COLLISION,
-                    exclude_prim_paths=exclude_paths,
-                )
+    def submit(
+        self,
+        robot_id: int,
+        mode: str,
+        q_initial: np.ndarray,
+        q_target: np.ndarray | None = None,
+        position: np.ndarray | None = None,
+        orientation: np.ndarray | None = None,
+        phase_name: str = "",
+    ) -> int | None:
+        """Send a plan request; returns its request_id (None if the planner is dead)."""
+        if not self._alive:
+            return None
+        request_id = self._next_id
+        self._next_id += 1
+        try:
+            self._conn.send(
+                {
+                    "type": "plan",
+                    "request_id": request_id,
+                    "robot_id": robot_id,
+                    "mode": mode,
+                    "q_initial": np.asarray(q_initial, dtype=np.float64),
+                    "q_target": None if q_target is None else np.asarray(q_target, dtype=np.float64),
+                    "position": None if position is None else np.asarray(position, dtype=np.float64),
+                    "orientation": None if orientation is None else np.asarray(orientation, dtype=np.float64),
+                    "phase_name": phase_name,
+                }
             )
-            world_binding = mg.WorldBinding(
-                world_interface=CumotionWorldInterface(),
-                obstacle_strategy=obstacle_strategy,
-                tracked_prims=tracked_prims,
-                tracked_collision_api=mg.TrackableApi.PHYSICS_COLLISION,
+        except (EOFError, OSError, BrokenPipeError) as exc:
+            self._mark_dead(exc)
+            return None
+        return request_id
+
+    def pump(self) -> None:
+        """Drain all pending result messages from the subprocess (non-blocking)."""
+        if not self._alive:
+            return
+        try:
+            while self._conn.poll():
+                msg = self._conn.recv()
+                if msg.get("type") == "plan_result":
+                    self._results[msg["robot_id"]] = msg
+        except (EOFError, OSError) as exc:
+            self._mark_dead(exc)
+
+    def take(self, robot_id: int, request_id: int) -> dict | None:
+        """Return the result for (robot_id, request_id) if it has arrived, else None."""
+        msg = self._results.get(robot_id)
+        if msg is not None and msg["request_id"] == request_id:
+            del self._results[robot_id]
+            return msg
+        return None
+
+    def _mark_dead(self, exc: Exception) -> None:
+        if self._alive:
+            print(
+                f"[pick_and_place] WARNING: planner subprocess connection lost ({exc!r}); "
+                "arms will hold, the rest of the sim keeps running",
+                flush=True,
             )
+        self._alive = False
+
+    def close(self) -> None:
+        """Tell the subprocess to stop and close the connection."""
+        if self._alive:
             try:
-                world_binding.initialize()
-                break
-            except (AssertionError, RuntimeError) as exc:
-                if attempt >= max_attempts - 1:
-                    raise
-                message = str(exc)
-                if "non-unity scaling" in message:
-                    offending_paths = re.findall(r"'(/[^']+)'", message)
-                elif "does not point to a supported shape type" in message:
-                    offending_paths = re.findall(r"Prim path (\S+) does not point", message)
-                else:
-                    raise
-                if not offending_paths:
-                    raise
-                print(
-                    f"[pick_and_place] WARNING: excluding from the planner's obstacle set "
-                    f"(pre-existing conveyor_setup.usd quirk, see comment above): {offending_paths}",
-                    flush=True,
-                )
-                exclude_paths = exclude_paths + offending_paths
-    finally:
-        for guard_path, original_local_quat in rotation_guard_snapshot.items():
-            guard_prim = stage.GetPrimAtPath(guard_path)
-            if guard_prim.IsValid() and "xformOp:orient" in guard_prim.GetPropertyNames():
-                # Match whatever precision xformOp:orient is actually
-                # authored at (Gf.Quatf vs Gf.Quatd) rather than assuming
-                # Quatd unconditionally - Usd.Attribute.Set() raises a type-
-                # mismatch Tf error otherwise on any guarded prim whose
-                # orient happens to be single-precision (confirmed against
-                # 5_conv_env.usd's SteelBoxTruck body mesh, authored as
-                # `quatf`; racetrack.usd apparently never exercised this
-                # restore path against a quatf-typed prim). GetRotation().GetQuat()
-                # above always returns a Quatd regardless of the source
-                # attribute's precision, so the mismatch is with THIS write,
-                # not the snapshot.
-                orient_attr = guard_prim.GetAttribute("xformOp:orient")
-                quat_type = type(orient_attr.Get()) if orient_attr.Get() is not None else Gf.Quatd
-                orient_attr.Set(quat_type(original_local_quat))
-
-    world_binding.get_world_interface().update_world_to_robot_root_transforms(poses=(robot_pos, robot_ori))
-    world_binding.synchronize_transforms()
-
-    planner = GraphBasedMotionPlanner(
-        cumotion_robot=cumotion_robot,
-        cumotion_world_interface=world_binding.get_world_interface(),
-        tool_frame=TOOL_FRAME_NAME,
-    )
-    return planner, world_binding, cumotion_robot
+                self._conn.send({"type": "stop"})
+            except (EOFError, OSError):
+                pass
+        try:
+            self._conn.close()
+        except OSError:
+            pass
+        self._alive = False
 
 
 class MagicAttachPickPlace:
@@ -359,24 +332,30 @@ class MagicAttachPickPlace:
         place_belt_top_z: float,
         box_rigid_prims: dict,
         physics_dt: float,
-        extra_exclude_obstacle_paths: list[str] = (),
+        planner_client: PlannerClient,
+        robot_id: int,
         default_joint_positions: list[float] = UR20_DEFAULT_JOINT_POSITIONS,
         pre_place_joint_positions: list[float] = UR20_PRE_PLACE_JOINT_POSITIONS,
+        nudge_pick_zone_fn: Callable[[], None] | None = None,
     ) -> None:
         self.robot = robot
         self.place_xy = place_xy
         self.place_belt_top_z = place_belt_top_z
         self.box_rigid_prims = box_rigid_prims
         self._physics_dt = physics_dt
+        # Shared handle to the planner subprocess + this robot's id within it
+        # (the subprocess builds one planner per robot; see planner_server.py).
+        self._planner = planner_client
+        self._robot_id = robot_id
         # See UR20_PRE_PLACE_JOINT_POSITIONS_AWAY for when to override these.
         self._default_joint_positions = default_joint_positions
         self._pre_place_joint_positions = pre_place_joint_positions
+        # Called when DESCEND_TO_PICK planning fails (see forward()) to pulse
+        # the pick zone's belt a bit, so the box resettles at a slightly
+        # different spot before the next attempt - owned by conveyor_indexer.py,
+        # which has the actual ConveyorZone.
+        self._nudge_pick_zone_fn = nudge_pick_zone_fn
 
-        self.planner, self.world_binding, self._cumotion_robot = _build_motion_planner(
-            robot,
-            robot_path,
-            exclude_obstacle_paths=[robot_path, *box_rigid_prims.keys(), *extra_exclude_obstacle_paths],
-        )
         wrist_link_name, flange_subprim_name = TOOL_FRAME_LIVE_PRIM_SUBPATH.split("/")
         link_names = list(robot.link_names)
         self._wrist_link_path = robot.link_paths[0][link_names.index(wrist_link_name)]
@@ -398,8 +377,14 @@ class MagicAttachPickPlace:
 
         self._phase = Phase.WAITING
         self._step = 0
-        self._t = 0.0
-        self._trajectory = None
+        self._replan_cooldown = 0
+        self._planning_attempt = 0
+        # Plan request/playback state (see _drive_to). While a request is
+        # outstanding the arm holds its pose; once the subprocess returns a
+        # sampled trajectory it's played back one sample per physics tick.
+        self._pending_request_id: int | None = None
+        self._samples: np.ndarray | None = None  # (T, n_active_joints)
+        self._sample_indices: np.ndarray | None = None  # dof indices for set_dof_position_targets
         self._pick_point: np.ndarray | None = None
         # Which of STAGE_FOR_PICK/STAGE_FOR_PLACE's two visits per cycle this
         # is: False on the way to a descent, True on the way back up after
@@ -485,47 +470,6 @@ class MagicAttachPickPlace:
         naturally under gravity from wherever it currently is."""
         stage_utils.delete_prim(self._attach_joint_path)
 
-    def _solve_ik_target(
-        self, target_position: np.ndarray, orientation: np.ndarray, q_initial: np.ndarray
-    ) -> np.ndarray:
-        """Solve for a single joint configuration reaching (target_position, orientation),
-        seeded at q_initial and biased toward the middle of each joint's range.
-
-        Gives plan_to_cspace_target a concrete destination to plan to, instead
-        of letting plan_to_pose_target's JtRRT settle on whatever
-        pose-satisfying (but possibly contorted) configuration its random
-        tree happens to reach first - see IK_CSPACE_LIMIT_BIASING_WEIGHT
-        comment above.
-        """
-        position_world_to_base, quaternion_world_to_base = (
-            self.world_binding.get_world_interface().get_world_to_robot_base_transform()
-        )
-        target_pose_base = isaac_sim_to_cumotion_pose(
-            position_world_to_target=target_position,
-            orientation_world_to_target=orientation,
-            position_world_to_base=position_world_to_base,
-            orientation_world_to_base=quaternion_world_to_base,
-        )
-
-        ik_config = cumotion.IkConfig()
-        ik_config.bfgs_cspace_limit_biasing = cumotion.IkConfig.CSpaceLimitBiasing.ENABLE
-        ik_config.bfgs_cspace_limit_biasing_weight = IK_CSPACE_LIMIT_BIASING_WEIGHT
-        ik_config.cspace_seeds = [q_initial]
-
-        result = cumotion.solve_ik(
-            kinematics=self._cumotion_robot.kinematics,
-            target_pose=target_pose_base,
-            target_frame=TOOL_FRAME_NAME,
-            config=ik_config,
-        )
-        if not result.success:
-            raise RuntimeError(
-                f"cumotion.solve_ik found no joint configuration for "
-                f"target_position={target_position} orientation={orientation} "
-                f"(seeded at q_initial={q_initial})"
-            )
-        return result.cspace_position
-
     def _drive_to(
         self,
         target_position: np.ndarray | None,
@@ -534,93 +478,98 @@ class MagicAttachPickPlace:
         use_ik_cspace_target: bool = False,
         cspace_target: np.ndarray | list[float] | None = None,
     ) -> bool:
-        """Plan a fresh collision-free path to a target at phase entry, then play
-        back the resulting trajectory open-loop; return True once this phase
-        should end.
+        """Request a collision-free plan from the planner subprocess at phase
+        entry, then play back the sampled trajectory it returns open-loop;
+        return True once this phase should end.
+
+        Non-blocking: the plan request is shipped to the subprocess and this
+        returns False (arm holds its pose) every tick until the result arrives,
+        so the main loop keeps stepping the other robot and the conveyors while
+        cuMotion computes. Raises PlanningFailedError after PLANNING_RETRIES
+        failed results (caught in forward()).
 
         Exactly one target flavor applies, in this order of precedence:
-          - cspace_target: plan_to_cspace_target directly to a known joint
-            configuration (e.g. UR20_DEFAULT_JOINT_POSITIONS /
-            UR20_PRE_PLACE_JOINT_POSITIONS) - target_position/orientation are
-            ignored.
-          - use_ik_cspace_target: solve IK to one concrete joint target first
-            (see _solve_ik_target), then plan_to_cspace_target to exactly
-            that configuration, instead of plan_to_pose_target's task-space
-            JtRRT.
-          - otherwise: plan_to_pose_target(target_position, orientation)
-            directly (task-space JtRRT).
+          - cspace_target: plan straight to a known joint configuration (e.g.
+            UR20_DEFAULT_JOINT_POSITIONS / UR20_PRE_PLACE_JOINT_POSITIONS) -
+            target_position/orientation are ignored.
+          - use_ik_cspace_target: the subprocess solves IK to one concrete
+            joint target first, then plans to it (avoids a contorted
+            task-space JtRRT configuration).
+          - otherwise: plan straight to the task-space pose
+            (target_position, orientation).
         """
-        if self._step == 0:
-            self.world_binding.get_world_interface().update_world_to_robot_root_transforms(
-                poses=self.robot.get_world_poses()
-            )
-            self.world_binding.synchronize_transforms()
+        if self._samples is None:
+            # Planning phase - no trajectory yet. Submit once, then poll.
+            if self._pending_request_id is None:
+                q_initial = self.robot.get_dof_positions().numpy()[0].astype(np.float64)
+                if cspace_target is not None:
+                    mode, q_target = "cspace", np.asarray(cspace_target, dtype=np.float64)
+                    self._pending_request_id = self._planner.submit(
+                        self._robot_id, mode, q_initial, q_target=q_target, phase_name=phase_name
+                    )
+                else:
+                    mode = "ik_cspace" if use_ik_cspace_target else "pose"
+                    self._pending_request_id = self._planner.submit(
+                        self._robot_id, mode, q_initial,
+                        position=target_position, orientation=orientation, phase_name=phase_name,
+                    )
+                if self._pending_request_id is None:
+                    # Planner subprocess is gone (see PlannerClient) - hold
+                    # pose indefinitely; the rest of the sim keeps running.
+                    return False
 
-            q_initial = self.robot.get_dof_positions().numpy()[0].astype(np.float64)
-            path = None
-            if cspace_target is not None:
-                q_target = np.asarray(cspace_target, dtype=np.float64)
-            elif use_ik_cspace_target:
-                q_target = self._solve_ik_target(target_position, orientation, q_initial)
-            else:
-                q_target = None
+            resp = self._planner.take(self._robot_id, self._pending_request_id)
+            if resp is None:
+                # Still computing - hold pose, let the rest of the sim advance.
+                return False
+            self._pending_request_id = None
 
-            if q_target is not None:
-                for attempt in range(PLANNING_RETRIES):
-                    path = self.planner.plan_to_cspace_target(q_initial=q_initial, q_final=q_target)
-                    if path is not None:
-                        break
-                    print(
-                        f"[pick_and_place] WARNING: cspace planning attempt {attempt + 1}/{PLANNING_RETRIES} "
-                        f"failed entering {phase_name} (q_target={q_target}), retrying",
-                        flush=True,
+            if not resp["ok"]:
+                self._planning_attempt += 1
+                if self._planning_attempt >= PLANNING_RETRIES:
+                    self._planning_attempt = 0
+                    raise PlanningFailedError(
+                        f"planner subprocess found no collision-free path entering {phase_name} "
+                        f"after {PLANNING_RETRIES} attempts (last error: {resp.get('error')})"
                     )
-            else:
-                for attempt in range(PLANNING_RETRIES):
-                    path = self.planner.plan_to_pose_target(
-                        q_initial=q_initial, position=target_position, orientation=orientation
-                    )
-                    if path is not None:
-                        break
-                    print(
-                        f"[pick_and_place] WARNING: planning attempt {attempt + 1}/{PLANNING_RETRIES} "
-                        f"failed entering {phase_name} (target={target_position}), retrying",
-                        flush=True,
-                    )
-            if path is None:
-                raise RuntimeError(
-                    f"GraphBasedMotionPlanner found no collision-free path entering {phase_name} "
-                    f"(target={target_position if q_target is None else q_target}) "
-                    f"after {PLANNING_RETRIES} attempts"
+                print(
+                    f"[pick_and_place] WARNING: plan request {self._planning_attempt}/{PLANNING_RETRIES} "
+                    f"failed entering {phase_name} ({resp.get('error')}), re-requesting next tick",
+                    flush=True,
                 )
+                # Not finished; re-submit next tick, letting the sim step between.
+                return False
 
-            self._trajectory = path.to_minimal_time_joint_trajectory(
-                max_velocities=MAX_JOINT_VELOCITIES,
-                max_accelerations=MAX_JOINT_ACCELERATIONS,
-                robot_joint_space=list(self.robot.dof_names),
-                active_joints=self._cumotion_robot.controlled_joint_names,
-            )
-            self._t = 0.0
+            self._planning_attempt = 0
+            self._samples = resp["positions"]
+            # The subprocess returns positions in `joint_names` order; map those
+            # names to this articulation's dof indices once (cached), so the
+            # ordering never has to match implicitly.
+            if self._sample_indices is None:
+                dof_names = list(self.robot.dof_names)
+                self._sample_indices = np.array(
+                    [dof_names.index(name) for name in resp["joint_names"]], dtype=np.int64
+                )
+            self._step = 0
 
-        target_state = self._trajectory.get_target_state(self._t)
-        if target_state is not None and target_state.joints.positions is not None:
+        # Playback: one sampled joint target per physics tick.
+        if self._step < len(self._samples):
             self.robot.set_dof_position_targets(
-                positions=target_state.joints.positions, dof_indices=target_state.joints.position_indices
+                positions=self._samples[self._step], dof_indices=self._sample_indices
             )
 
-        self._t += self._physics_dt
         self._step += 1
-
-        finished = self._t >= self._trajectory.duration
+        finished = self._step >= len(self._samples)
         timed_out = self._step >= PHASE_TICKS[phase_name]
         if timed_out and not finished:
             print(
                 f"[pick_and_place] {phase_name} exceeded its {PHASE_TICKS[phase_name]}-tick budget "
-                f"before the planned trajectory (duration={self._trajectory.duration:.2f}s) finished",
+                f"before the sampled trajectory ({len(self._samples)} samples) finished",
                 flush=True,
             )
         if finished or timed_out:
             self._step = 0
+            self._samples = None  # _sample_indices is constant; keep it cached
             return True
         return False
 
@@ -629,6 +578,14 @@ class MagicAttachPickPlace:
         # _attach_box() creates the FixedJoint, PhysX itself keeps the box
         # rigidly following wrist_3_link (position and orientation) for the
         # whole STAGE_FOR_PICK(carrying)/STAGE_FOR_PLACE/DESCEND_TO_PLACE carry.
+
+        if self._replan_cooldown > 0:
+            # Pausing between a plan_to_cspace_target/plan_to_pose_target
+            # failure (see PlanningFailedError handlers below) and the next
+            # attempt at the SAME target - otherwise a persistently
+            # unreachable target would hammer the planner every physics tick.
+            self._replan_cooldown -= 1
+            return
 
         if self._phase == Phase.WAITING:
             if pick_ready and box_path is not None:
@@ -671,11 +628,36 @@ class MagicAttachPickPlace:
             # before DESCEND_TO_PICK's reach, then again right after ATTACH
             # to lift the (now carried) box back up through the same pose,
             # before handing off to STAGE_FOR_PLACE.
-            if self._drive_to(None, "STAGE_FOR_PICK", cspace_target=self._default_joint_positions):
+            try:
+                finished = self._drive_to(None, "STAGE_FOR_PICK", cspace_target=self._default_joint_positions)
+            except PlanningFailedError as exc:
+                print(f"[pick_and_place] WARNING: {exc}; pausing then retrying", flush=True)
+                self._replan_cooldown = REPLAN_COOLDOWN_TICKS
+                return
+            if finished:
                 self._phase = Phase.STAGE_FOR_PLACE if self._holding_box else Phase.DESCEND_TO_PICK
 
         elif self._phase == Phase.DESCEND_TO_PICK:
-            if self._drive_to(self._pick_point, "DESCEND_TO_PICK"):
+            try:
+                finished = self._drive_to(self._pick_point, "DESCEND_TO_PICK")
+            except PlanningFailedError as exc:
+                # Recoverable, unlike the other phases' targets: the pick
+                # point is just wherever the box happened to settle, so
+                # nudging the pick-zone belt a bit and re-detecting the box
+                # (reusing WAITING's own settle-check/pick-point logic below)
+                # gives the next attempt a genuinely different, hopefully
+                # reachable target - instead of retrying the same failing one.
+                print(
+                    f"[pick_and_place] WARNING: {exc}; nudging pick zone conveyor and retrying with box's new position",
+                    flush=True,
+                )
+                self.box.set_enabled_rigid_bodies([True])
+                if self._nudge_pick_zone_fn is not None:
+                    self._nudge_pick_zone_fn()
+                self._phase = Phase.WAITING
+                self._step = 0
+                return
+            if finished:
                 print(
                     f"[pick_and_place] DEBUG DESCEND_TO_PICK end: ee_pos={self._tool_world_position()} "
                     f"pick_point={self._pick_point} box={self.box.paths} "
@@ -697,13 +679,25 @@ class MagicAttachPickPlace:
                 self._phase = Phase.STAGE_FOR_PICK
 
         elif self._phase == Phase.STAGE_FOR_PLACE:
-            if self._drive_to(None, "STAGE_FOR_PLACE", cspace_target=self._pre_place_joint_positions):
+            try:
+                finished = self._drive_to(None, "STAGE_FOR_PLACE", cspace_target=self._pre_place_joint_positions)
+            except PlanningFailedError as exc:
+                print(f"[pick_and_place] WARNING: {exc}; pausing then retrying", flush=True)
+                self._replan_cooldown = REPLAN_COOLDOWN_TICKS
+                return
+            if finished:
                 self._phase = Phase.DESCEND_TO_PLACE if self._holding_box else Phase.WAITING
 
         elif self._phase == Phase.DESCEND_TO_PLACE:
-            if self._drive_to(
-                self.place_position, "DESCEND_TO_PLACE", orientation=PLACE_ORIENTATION, use_ik_cspace_target=True
-            ):
+            try:
+                finished = self._drive_to(
+                    self.place_position, "DESCEND_TO_PLACE", orientation=PLACE_ORIENTATION, use_ik_cspace_target=True
+                )
+            except PlanningFailedError as exc:
+                print(f"[pick_and_place] WARNING: {exc}; pausing then retrying", flush=True)
+                self._replan_cooldown = REPLAN_COOLDOWN_TICKS
+                return
+            if finished:
                 self._phase = Phase.DETACH
 
         elif self._phase == Phase.DETACH:

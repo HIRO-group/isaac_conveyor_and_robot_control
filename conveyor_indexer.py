@@ -14,11 +14,15 @@ this scaffold does NOT implement yet.
 
 from __future__ import annotations
 
+import ctypes
 import math
 import os
 import pathlib
 import signal
+import subprocess
 import sys
+import tempfile
+from multiprocessing.connection import Listener
 
 from isaacsim import SimulationApp
 
@@ -46,7 +50,13 @@ except ModuleNotFoundError:
 
 from conveyor_state_machine import ConveyorZoneStateMachine
 from conveyor_indexing_logger import ConveyorIndexingLogger
-from pick_and_place import create_pedestal_and_robot, MagicAttachPickPlace, UR20_PRE_PLACE_JOINT_POSITIONS_AWAY
+from pick_and_place import (
+    create_pedestal_and_robot,
+    MagicAttachPickPlace,
+    PlannerClient,
+    UR20_PRE_PLACE_JOINT_POSITIONS_AWAY,
+)
+from scene_setup import apply_truck_collision, deactivate_frame_meshes, localize_asset_references
 
 STAGE_PATH = os.path.join(os.path.expanduser("~"), "5_conv_env.usd")
 LOG_OUTPUT_DIR = os.path.join(REPO_DIR, "data")
@@ -128,8 +138,8 @@ TRUCK_PATH = "/World/SteelBoxTruck_A01_01"
 # itself (not yet root-caused), not something introduced here. The ground
 # plane doesn't need cuMotion obstacle avoidance anyway (the arm, mounted on
 # a 1.6 m pedestal, never reaches down into it), so it's excluded from
-# obstacle tracking via MagicAttachPickPlace's `extra_exclude_obstacle_paths`
-# rather than chasing the recursion bug itself.
+# obstacle tracking via each robot's `extra_exclude` in the planner init
+# config (see main()) rather than chasing the recursion bug itself.
 GROUND_PLANE_COLLISION_PATH = "/World/GroundPlane/CollisionPlane"
 
 # 5_conv_env.usd already ships its own pallet of ~18 CubeBox_* prims
@@ -203,6 +213,13 @@ LOOP1_RUN_SPEED_PCT = 55  # was 60; nudged down for more stopping margin at Conv
 # direction ("the speed going into the truck is fine").
 LOOP2_RUN_SPEED_PCT = 50
 
+# ConveyorZone.nudge() parameters for a pick zone that failed to plan a
+# descend (see MagicAttachPickPlace's nudge_pick_zone_fn) - short and slow
+# enough to shift the box a few cm rather than send it overflowing off the
+# zone entirely.
+PICK_REPLAN_NUDGE_TICKS = 12
+PICK_REPLAN_NUDGE_SPEED_PCT = 20
+
 # Both loops in 5_conv_env.usd are already authored close enough for a UR20
 # (1.75 m spec reach - see robot_configs/ur20/, generated via cuMotion) to
 # bridge without any runtime repositioning: ConveyorTrack_01 (loop 1 pick
@@ -213,7 +230,17 @@ LOOP2_RUN_SPEED_PCT = 50
 # UR10, but here the un-shifted geometry already fits a UR20 comfortably).
 ROBOT_POSITION = (-3.0, 1.0928, 0.0)  # (x, y, z-of-ground-contact); Y = loop midpoint
 PEDESTAL_HEIGHT = 1.6
+PEDESTAL_RADIUS = 0.15  # matches create_pedestal_and_robot's default
 PLACE_XY = (-3.0, 2.1857)  # ConveyorTrack_09's belt-top Y center
+
+# Sent to the planner subprocess as this robot's cuMotion config (see
+# planner_server_impl.py). Per-joint limits for time-parameterizing planned
+# paths; the XRDF/URDF live in robot_configs/ur20 (loaded there, not here).
+UR20_XRDF_PATH = os.path.join(REPO_DIR, "robot_configs", "ur20", "robot.xrdf")
+UR20_URDF_PATH = os.path.join(REPO_DIR, "robot_configs", "ur20", "robot.urdf")
+UR20_TOOL_FRAME = "tool0"
+MAX_JOINT_VELOCITIES = [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+MAX_JOINT_ACCELERATIONS = [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
 
 CONVEYOR_TRACK_ROOTS = ("/World/ConveyorTrack", "/World/ConveyorTrack_01", "/World/ConveyorTrack_02", "/World/ConveyorTrack_09", "/World/ConveyorTrack_10")
 
@@ -329,6 +356,26 @@ class ConveyorZone:
 
         self.state_machine = ConveyorZoneStateMachine(name=node_path, run_speed_pct=run_speed_pct)
         self.state_machine.start()
+
+        # Set by nudge(); consumed in ConveyorLineController.step(), which
+        # overrides the state machine's own command (a held pick zone
+        # otherwise commands run=False every tick) for this many remaining
+        # ticks - see nudge()'s own docstring.
+        self._nudge_ticks_remaining = 0
+        self._nudge_speed_pct = 0
+
+    def nudge(self, ticks: int, speed_pct: int) -> None:
+        """Briefly force this zone's belt to run, overriding its own hold
+        state machine, so an occupying part shifts a bit rather than staying
+        pinned exactly where it first settled.
+
+        Used when pick_and_place.py's motion planner fails to reach a box at
+        its current settled position - see MagicAttachPickPlace's
+        nudge_pick_zone_fn - since retrying the identical unreachable target
+        would just fail again.
+        """
+        self._nudge_ticks_remaining = ticks
+        self._nudge_speed_pct = speed_pct
 
     def get_occupying_prim_paths(self) -> list:
         """Return the paths of every non-excluded rigid body overlapping this zone.
@@ -652,7 +699,7 @@ class ConveyorLineController:
                     # is_last has no downstream to overshoot into but open
                     # ground - stop much earlier, leaving most of the belt
                     # as deceleration runway instead of just the back half.
-                    stop_fraction = 0.15 if is_last else 0.5
+                    stop_fraction = 0.18 if is_last else 0.5
                     at_stop_position = zone.is_past_center(position.numpy()[0], stop_fraction=stop_fraction)
 
             observation, command = zone.state_machine.step(
@@ -661,6 +708,12 @@ class ConveyorLineController:
                 downstream_clear=downstream_clear,
                 at_stop_position=at_stop_position,
             )
+            if zone._nudge_ticks_remaining > 0:
+                # Overrides the state machine's own command (e.g. a held pick
+                # zone's run=False) for a few ticks - see ConveyorZone.nudge().
+                command.run = True
+                command.speed_pct = zone._nudge_speed_pct
+                zone._nudge_ticks_remaining -= 1
             if DEBUG_LOG_HOLD_ZONE_STATE and i in self.hold_zone_indices:
                 print(
                     f"[conveyor_indexer] DEBUG hold zone: {zone.node_path} occupied={self.occupied[i]} "
@@ -703,39 +756,6 @@ class ConveyorLineController:
             Machine.CONVEYOR_STATE_MACHINE_PASSTHROUGH,
         }
         return common_types.PACKML_EXECUTE if machine in running_states else common_types.PACKML_IDLE
-
-
-def _deactivate_frame_meshes(stage: Usd.Stage, track_roots: tuple) -> None:
-    """Deactivate every track's `SM_ConveyorBelt_A06_02` frame/upright-posts mesh.
-
-    Applied at runtime (stage.SetActive(False)) rather than edited into
-    5_conv_env.usd, so the authored scene file is left untouched. This
-    removes the mesh from rendering AND from PhysX collision - unlike the
-    `Belt` mesh (see the large comment above `_apply_box_physics`), this frame
-    mesh currently IS tracked by cuMotion's RMPflow obstacle world, so
-    deactivating it means the arm no longer avoids the frame/upright posts,
-    only the belt-top zone bboxes it's separately given.
-
-    Unlike racetrack.usd (8 straight + curved tracks per loop, the curved
-    ones using a different frame asset, `SM_ConveyorBelt_A12`), every track in
-    5_conv_env.usd is the same straight `ConveyorBelt_A06` asset - so every
-    root is expected to match; a miss is a real error, not an
-    allowed-for curved-track gap.
-    """
-    deactivated = []
-    for root in track_roots:
-        root_prim = stage.GetPrimAtPath(root)
-        if not root_prim.IsValid():
-            raise RuntimeError(f"Expected conveyor track prim not found at {root}")
-        matched = False
-        for prim in Usd.PrimRange(root_prim):
-            if prim.GetName() == "SM_ConveyorBelt_A06_02":
-                prim.SetActive(False)
-                deactivated.append(str(prim.GetPath()))
-                matched = True
-        if not matched:
-            raise RuntimeError(f"No SM_ConveyorBelt_A06_02 mesh found under: {root}")
-    print(f"[conveyor_indexer] deactivated {len(deactivated)} SM_ConveyorBelt_A06_02 frame meshes", flush=True)
 
 
 def _discover_box_prim_paths(stage: Usd.Stage) -> list:
@@ -867,101 +887,6 @@ def _apply_box_physics(stage: Usd.Stage, box_paths: list) -> None:
     print(f"[conveyor_indexer] applied rigid-body physics to {len(box_paths)} boxes", flush=True)
 
 
-def _apply_truck_collision(stage: Usd.Stage, truck_path: str) -> None:
-    """Add a static collider to the truck bed so falling boxes land in it
-    instead of clipping straight through.
-
-    `/World/SteelBoxTruck_A01_01` (like the boxes) is a pure visual payload -
-    confirmed via direct inspection, no physics schemas anywhere in its
-    subtree. Only its body mesh (`sm_steelboxtruck_a01_body_01`, the
-    bed/frame shape boxes actually land in/on) gets a collider - the wheel
-    meshes don't need one for this scaffold's purposes. Static (CollisionAPI
-    only, no RigidBodyAPI) since the truck itself never moves; the default
-    exact-triangle-mesh approximation is fine here (unlike the boxes, this
-    is a static collider, not one in dynamic-dynamic contact every tick).
-    """
-    body_prim = stage.GetPrimAtPath(f"{truck_path}/sm_steelboxtruck_a01_body_01")
-    if not body_prim.IsValid():
-        raise RuntimeError(f"Expected truck body mesh not found under {truck_path}")
-    UsdPhysics.CollisionAPI.Apply(body_prim)
-    print(f"[conveyor_indexer] added static collision to {body_prim.GetPath()}", flush=True)
-
-
-def _localize_asset_references(stage_path: str, remote_root: str, local_root: str) -> None:
-    """Rewrite every reference/payload asset path under remote_root to
-    local_root, in the in-memory Sdf.Layer for stage_path, BEFORE it's ever
-    opened as a Usd.Stage.
-
-    Order matters: opening stage_path as a Usd.Stage (as main() does right
-    after calling this) composes every referenced/payloaded prim - e.g. each
-    ConveyorTrack's referenced Belt/frame geometry - which is exactly when
-    Kit would fetch these assets over the network. Sdf.Layer.FindOrOpen,
-    unlike Usd.Stage.Open, just parses the raw layer content (prim specs and
-    their un-resolved reference/payload list ops) without triggering that
-    composition/fetch - so every rewrite here happens first, and by the time
-    ctx.open_stage(stage_path) runs (finding this same, now-modified layer
-    already resident in Sdf's process-global layer registry, keyed by
-    resolved identifier, rather than re-reading the file from disk) it only
-    ever resolves local paths. Not saved back to disk, so 5_conv_env.usd
-    itself is never touched - same "runtime-only" convention as every other
-    mutation in this module (e.g. _deactivate_frame_meshes).
-
-    A no-op (falls back to fetching from remote_root, same as before this
-    function existed) if local_root doesn't exist - e.g. `download_assets.py`
-    (see README) hasn't been run yet on this machine.
-
-    Only handles `prepend` list-op items (`prependedItems`) - confirmed via
-    direct inspection that every reference/payload in 5_conv_env.usd is
-    authored that way (`prepend references = @url@` / `prepend payload =
-    @url@`), never `explicit`/`append`/`delete`.
-    """
-    if not os.path.isdir(local_root):
-        print(
-            f"[conveyor_indexer] {local_root} not found - fetching assets from {remote_root} instead "
-            "(see README's download_assets.py note to cache them locally)",
-            flush=True,
-        )
-        return
-
-    layer = Sdf.Layer.FindOrOpen(stage_path)
-    if layer is None:
-        raise RuntimeError(f"Could not open {stage_path} as an Sdf.Layer")
-
-    def _iter_prim_specs(root_specs):
-        stack = list(root_specs)
-        while stack:
-            spec = stack.pop()
-            yield spec
-            stack.extend(spec.nameChildren.values())
-
-    def _localized(asset_path: str) -> str:
-        return os.path.join(local_root, asset_path[len(remote_root):])
-
-    rewritten = 0
-    for spec in _iter_prim_specs(layer.rootPrims.values()):
-        refs = spec.referenceList
-        if refs.prependedItems:
-            new_items = []
-            for item in refs.prependedItems:
-                if item.assetPath.startswith(remote_root):
-                    item = Sdf.Reference(_localized(item.assetPath), item.primPath, item.layerOffset, item.customData)
-                    rewritten += 1
-                new_items.append(item)
-            refs.prependedItems = new_items
-
-        payloads = spec.payloadList
-        if payloads.prependedItems:
-            new_items = []
-            for item in payloads.prependedItems:
-                if item.assetPath.startswith(remote_root):
-                    item = Sdf.Payload(_localized(item.assetPath), item.primPath, item.layerOffset)
-                    rewritten += 1
-                new_items.append(item)
-            payloads.prependedItems = new_items
-
-    print(f"[conveyor_indexer] localized {rewritten} asset reference(s)/payload(s) to {local_root}", flush=True)
-
-
 # Each ConveyorTrack authors TWO separate collision meshes, confirmed by
 # traversing the stage: `SM_ConveyorBelt_A06_02` (the frame/upright
 # posts/bolts, an ordinary static Mesh) and `Belt` (just the moving surface,
@@ -992,6 +917,110 @@ def _localize_asset_references(stage_path: str, remote_root: str, local_root: st
 # not a real object" middle ground via this API.
 
 
+def _discover_cumotion_ext_paths() -> list[str]:
+    """Return the on-disk dirs for the `warp` and `cumotion` packages.
+
+    These ship as Isaac Sim extensions whose sys.path entries are added by
+    Kit's extension manager; the planner subprocess (which never boots Kit)
+    can't find them on its own, so this process - which HAS Kit - resolves
+    them from the loaded modules and passes them down. Nothing is hardcoded.
+    """
+    import warp
+
+    paths = [os.path.dirname(os.path.dirname(os.path.abspath(warp.__file__)))]
+    try:
+        import cumotion
+    except ImportError:
+        import isaacsim.robot_motion.cumotion  # noqa: F401  (loads the ext, adds cumotion to sys.path)
+        import cumotion
+    paths.append(os.path.dirname(os.path.dirname(os.path.abspath(cumotion.__file__))))
+    return paths
+
+
+def _build_obstacle_specs(zones: list, robot_positions: list) -> list[dict]:
+    """World-frame cuboid obstacle specs for the planner subprocess.
+
+    The old design let cuMotion auto-scan the USD stage; the direct-API
+    subprocess can't, so we hand it exactly the obstacles that matter here:
+    each robot's pedestal, and each conveyor as a solid block from the floor up
+    to its belt-top surface (belt XY footprint). The truck is out of reach (per
+    explicit confirmation) and omitted; boxes are the manipulated targets and
+    never obstacles; the arms are separated so they don't model each other.
+    Each spec is a cuboid {side_lengths, position (world), orientation wxyz};
+    the child re-expresses them in each robot's base frame.
+    """
+    specs = []
+    for px, py, pz in robot_positions:
+        specs.append(
+            {
+                "side_lengths": [2 * PEDESTAL_RADIUS, 2 * PEDESTAL_RADIUS, PEDESTAL_HEIGHT],
+                "position": [px, py, pz + PEDESTAL_HEIGHT / 2.0],
+                "orientation": [1.0, 0.0, 0.0, 0.0],
+            }
+        )
+    bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
+    for zone in zones:
+        aligned = bbox_cache.ComputeWorldBound(zone.belt_prim).ComputeAlignedRange()
+        mn, mx = aligned.GetMin(), aligned.GetMax()
+        belt_top = mx[2]
+        specs.append(
+            {
+                "side_lengths": [float(mx[0] - mn[0]), float(mx[1] - mn[1]), float(belt_top)],
+                "position": [float(0.5 * (mn[0] + mx[0])), float(0.5 * (mn[1] + mx[1])), float(belt_top / 2.0)],
+                "orientation": [1.0, 0.0, 0.0, 0.0],
+            }
+        )
+    return specs
+
+
+def _spawn_planner_subprocess(init_config: dict, ext_paths: list[str]):
+    """Launch the out-of-process cuMotion planner and hand it its init config.
+
+    cuMotion planning holds the GIL for the whole solve, so it runs in this
+    separate process (its own GIL + CUDA context) rather than blocking the main
+    sim loop - see planner_server.py / planner_server_impl.py. The subprocess
+    uses cuMotion's low-level API directly (no SimulationApp), so it starts in
+    ~1-2s. Launched via Popen (NOT multiprocessing spawn, which would re-import
+    this module's top-level SimulationApp and start a second visible sim). IPC
+    is a full-duplex multiprocessing.connection over an AF_UNIX socket.
+
+    Blocks at accept() until the child has built every planner and reports
+    ready. Returns (listener, child, conn) for the caller to wrap in a
+    PlannerClient and to tear down at the end.
+    """
+    address = os.path.join(tempfile.gettempdir(), f"conveyor_planner_{os.getpid()}.sock")
+    if os.path.exists(address):
+        os.unlink(address)
+    authkey = os.urandom(16)
+    listener = Listener(address, authkey=authkey)
+    server_script = os.path.join(REPO_DIR, "planner_server.py")
+    argv = [sys.executable, server_script, "--addr", address, "--authkey", authkey.hex()]
+    for path in ext_paths:
+        argv += ["--ext-path", path]
+
+    def _set_pdeathsig():
+        # Linux: ask the kernel to SIGKILL this child the instant the parent
+        # dies, for ANY reason (including a hard `kill -9` that bypasses our
+        # finally). Without this, a hard-killed parent orphans the planner,
+        # which keeps holding a CUDA context and makes the next run's GPU init
+        # stall. prctl(PR_SET_PDEATHSIG=1, SIGKILL).
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGKILL)
+
+    child = subprocess.Popen(argv, cwd=REPO_DIR, preexec_fn=_set_pdeathsig)
+    print(
+        f"[conveyor_indexer] launched planner subprocess pid={child.pid}; "
+        "waiting for it to build its planners...",
+        flush=True,
+    )
+    conn = listener.accept()  # blocks until the child connects (after its startup)
+    conn.send({"type": "init", **init_config})
+    ready = conn.recv()
+    if ready.get("type") != "ready":
+        raise RuntimeError(f"planner subprocess sent {ready!r} instead of a ready message")
+    print("[conveyor_indexer] planner subprocess ready", flush=True)
+    return listener, child, conn
+
+
 def main() -> None:
     # isaacsim.asset.gen.conveyor (provides the ConveyorNode OmniGraph node
     # type every ConveyorBeltGraph uses) is not guaranteed to already be
@@ -1014,13 +1043,13 @@ def main() -> None:
     # referencing a physics_sim_view tied to the old, now-gone stage -
     # observed as "AttributeError: 'World' object has no attribute '_scene'"
     # inside world.reset() when this ordering was wrong).
-    _localize_asset_references(STAGE_PATH, REMOTE_ASSET_ROOT, LOCAL_ASSET_ROOT)
+    localize_asset_references(STAGE_PATH, REMOTE_ASSET_ROOT, LOCAL_ASSET_ROOT)
     print(f"[conveyor_indexer] opening stage {STAGE_PATH}", flush=True)
     ctx = omni.usd.get_context()
     ctx.open_stage(STAGE_PATH)
     stage = ctx.get_stage()
-    _deactivate_frame_meshes(stage, CONVEYOR_TRACK_ROOTS)
-    _apply_truck_collision(stage, TRUCK_PATH)
+    deactivate_frame_meshes(stage, CONVEYOR_TRACK_ROOTS)
+    apply_truck_collision(stage, TRUCK_PATH)
     box_paths = _discover_box_prim_paths(stage)
     if not box_paths:
         raise RuntimeError(
@@ -1124,11 +1153,56 @@ def main() -> None:
     print(f"[conveyor_indexer] DEBUG robot dof_positions AFTER reset_to_default_state(): {robot.get_dof_positions().numpy()}", flush=True)
     print("[conveyor_indexer] world.reset() done", flush=True)
 
-    # MagicAttachPickPlace builds the cuMotion RmpFlowController + collision
-    # world, which needs a valid PhysX tensor entity (robot.get_world_poses(),
-    # the SceneQuery obstacle scan) - must happen AFTER world.reset(), unlike
-    # the previous UR10/raw-IK version where construction was lightweight
-    # enough to happen before it.
+    # Motion planning runs in a dedicated subprocess (see
+    # _spawn_planner_subprocess and planner_server_impl.py) so a cuMotion solve
+    # doesn't block the main loop. It uses cuMotion's low-level API directly (no
+    # SimulationApp): we discover the warp/cumotion extension dirs here (this
+    # process has Kit) and pass them down, and hand it the robots' base poses
+    # plus explicit obstacle cuboids (this process has the geometry; the child
+    # has no zone tables / USD stage). Robot base = pedestal top, identity
+    # orientation (create_pedestal_and_robot only translates).
+    ext_paths = _discover_cumotion_ext_paths()
+    obstacle_specs = _build_obstacle_specs(
+        list(loop1.zones) + list(loop2.zones),
+        [ROBOT_POSITION, ROBOT_POSITION_2],
+    )
+    base_orientation = [1.0, 0.0, 0.0, 0.0]
+    robot_base_0 = [float(ROBOT_POSITION[0]), float(ROBOT_POSITION[1]), float(ROBOT_POSITION[2]) + PEDESTAL_HEIGHT]
+    robot_base_1 = [float(ROBOT_POSITION_2[0]), float(ROBOT_POSITION_2[1]), float(ROBOT_POSITION_2[2]) + PEDESTAL_HEIGHT]
+    planner_init = {
+        "physics_dt": world.get_physics_dt(),
+        "robots": [
+            {
+                "robot_id": 0,
+                "xrdf_path": UR20_XRDF_PATH,
+                "urdf_path": UR20_URDF_PATH,
+                "base_position": robot_base_0,
+                "base_orientation": base_orientation,
+                "tool_frame": UR20_TOOL_FRAME,
+                "max_velocities": MAX_JOINT_VELOCITIES,
+                "max_accelerations": MAX_JOINT_ACCELERATIONS,
+                "obstacles": obstacle_specs,
+            },
+            {
+                "robot_id": 1,
+                "xrdf_path": UR20_XRDF_PATH,
+                "urdf_path": UR20_URDF_PATH,
+                "base_position": robot_base_1,
+                "base_orientation": base_orientation,
+                "tool_frame": UR20_TOOL_FRAME,
+                "max_velocities": MAX_JOINT_VELOCITIES,
+                "max_accelerations": MAX_JOINT_ACCELERATIONS,
+                "obstacles": obstacle_specs,
+            },
+        ],
+    }
+    planner_listener, planner_child, planner_conn = _spawn_planner_subprocess(planner_init, ext_paths)
+    planner_client = PlannerClient(planner_conn)
+
+    # MagicAttachPickPlace is now the parent-side pick/place state machine +
+    # trajectory playback (no cuMotion). It ships plan requests to the
+    # subprocess via planner_client/robot_id and plays back the sampled
+    # trajectories it returns.
     # pre_place_joint_positions override: robot 2 sits on this robot's -X
     # side, so its STAGE_FOR_PICK<->STAGE_FOR_PLACE swing must arc away from
     # it instead - see UR20_PRE_PLACE_JOINT_POSITIONS_AWAY.
@@ -1139,8 +1213,12 @@ def main() -> None:
         place_belt_top_z=place_belt_top_z,
         box_rigid_prims=box_rigid_prims,
         physics_dt=world.get_physics_dt(),
-        extra_exclude_obstacle_paths=[GROUND_PLANE_COLLISION_PATH],
+        planner_client=planner_client,
+        robot_id=0,
         pre_place_joint_positions=UR20_PRE_PLACE_JOINT_POSITIONS_AWAY,
+        nudge_pick_zone_fn=lambda: loop1.zones[PICK_ZONE_INDEX].nudge(
+            PICK_REPLAN_NUDGE_TICKS, PICK_REPLAN_NUDGE_SPEED_PCT
+        ),
     )
     pick_place_2 = MagicAttachPickPlace(
         robot=robot2,
@@ -1149,7 +1227,11 @@ def main() -> None:
         place_belt_top_z=place_belt_top_z_2,
         box_rigid_prims=box_rigid_prims,
         physics_dt=world.get_physics_dt(),
-        extra_exclude_obstacle_paths=[GROUND_PLANE_COLLISION_PATH],
+        planner_client=planner_client,
+        robot_id=1,
+        nudge_pick_zone_fn=lambda: loop1.zones[PICK_ZONE_INDEX_2].nudge(
+            PICK_REPLAN_NUDGE_TICKS, PICK_REPLAN_NUDGE_SPEED_PCT
+        ),
     )
     loop1.set_hold_zone_ready_check(PICK_ZONE_INDEX, lambda: pick_place.phase_name == "WAITING")
     loop1.set_hold_zone_ready_check(PICK_ZONE_INDEX_2, lambda: pick_place_2.phase_name == "WAITING")
@@ -1165,19 +1247,23 @@ def main() -> None:
     pick_ready_2 = False
     pick_box_path_2 = None
 
-    # SIGTERM (container/systemd shutdown, `kill` without -INT) otherwise
-    # terminates the process immediately, bypassing the `finally` block below
-    # and the parquet writer never gets a clean close() - the in-progress
-    # file is left truncated/unreadable (missing footer). Route it through
-    # the normal loop-exit -> finally path instead, same as SIGINT/window
-    # close already do.
+    # SIGTERM (container/systemd shutdown, `kill` without -INT) and SIGINT
+    # (Ctrl+C) otherwise terminate the process abruptly - bypassing the
+    # `finally` below, so the parquet writer never gets a clean close() (the
+    # file is left truncated/unreadable) AND the planner subprocess + its
+    # socket are left to be reaped by PR_SET_PDEATHSIG instead of shut down
+    # cleanly. Route both through the normal loop-exit -> finally path.
+    # (Note: this only helps once the main loop is running; a signal during
+    # Kit's ~30s SimulationApp startup is queued but not serviced until Kit's
+    # C++ init returns - unavoidable from here.)
     shutdown_requested = False
 
-    def _handle_sigterm(signum, frame):
+    def _handle_shutdown_signal(signum, frame):
         nonlocal shutdown_requested
         shutdown_requested = True
 
-    signal.signal(signal.SIGTERM, _handle_sigterm)
+    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+    signal.signal(signal.SIGINT, _handle_shutdown_signal)
 
     Machine = plc.ConveyorStateMachineCode
 
@@ -1186,12 +1272,18 @@ def main() -> None:
             if world.is_playing():
                 world.step(render=True); sim_time += world.get_physics_dt()
 
-                # Pick-and-place motion runs every physics step for smooth
-                # RMPflow-driven convergence; conveyor indexing runs at the
-                # coarser control rate. `pick_ready`/`pick_box_path` only refresh at the
-                # control rate but are read every physics step - fine, since
-                # they only matter at the (infrequent) moment WAITING checks
-                # them.
+                # Drain any plan results the planner subprocess has returned
+                # since last tick (non-blocking) before the robots poll for
+                # them below - see PlannerClient.
+                planner_client.pump()
+
+                # Pick-and-place motion runs every physics step; conveyor
+                # indexing runs at the coarser control rate. `pick_ready`/
+                # `pick_box_path` only refresh at the control rate but are read
+                # every physics step - fine, since they only matter at the
+                # (infrequent) moment WAITING checks them. A robot whose plan
+                # is still being computed just holds its pose (see _drive_to),
+                # so this loop keeps stepping the other robot and the belts.
                 pick_place.forward(pick_ready, pick_box_path)
                 pick_place_2.forward(pick_ready_2, pick_box_path_2)
 
@@ -1262,6 +1354,21 @@ def main() -> None:
                     print(f"[conveyor_indexer] world not playing (render_count={render_count})", flush=True)
                 world.render()
     finally:
+        # Tell the planner subprocess to stop, then reap it so it doesn't
+        # linger; a short wait, escalating to kill if it won't exit.
+        planner_client.close()
+        try:
+            planner_child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            print("[conveyor_indexer] planner subprocess did not exit; killing it", flush=True)
+            planner_child.kill()
+        planner_listener.close()
+        # Listener.close() doesn't always remove the AF_UNIX socket file; do it
+        # explicitly so a killed run doesn't leave /tmp litter.
+        try:
+            os.unlink(planner_listener.address)
+        except OSError:
+            pass
         logger.close()
         simulation_app.close()
 
