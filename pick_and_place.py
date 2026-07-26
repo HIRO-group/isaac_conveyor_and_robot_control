@@ -1,11 +1,6 @@
 """Magic-attach pick-and-place: UR20 moves a box from a pick-zone conveyor to a
-place-zone conveyor on another loop, driven by NVIDIA cuMotion's
-GraphBasedMotionPlanner (isaacsim.robot_motion.cumotion) rather than raw
-per-tick differential IK or a reactive controller - collision-aware motion
-instead of a stateless one-shot IK solve every physics tick (see README's
-"Known gaps" history for why that mattered: the previous UR10 + raw-IK
-version produced visibly jerky motion and let the approaching arm physically
-shove the box out of place before "attaching" it).
+place-zone conveyor on another loop, via NVIDIA cuMotion's collision-aware
+GraphBasedMotionPlanner rather than raw per-tick differential IK.
 """
 
 from __future__ import annotations
@@ -13,6 +8,7 @@ from __future__ import annotations
 import math
 import os
 import re
+from collections.abc import Callable
 from enum import IntEnum
 
 import cumotion
@@ -35,16 +31,9 @@ from isaacsim.robot_motion.cumotion import (
 from isaacsim.robot_motion.cumotion.impl.utils import isaac_sim_to_cumotion_pose
 from isaacsim.storage.native import get_assets_root_path
 
-# isaacsim.robot_motion.cumotion's shipped code calls np.reshape(arr,
-# shape=[...]) - the `shape=` keyword only exists from NumPy 2.1 onward, but
-# this Isaac Sim install's bundled NumPy is 1.26.4, so every such call raises
-# TypeError. Patched here, in this process only (never touches the shared
-# Isaac Sim installation), rather than editing the vendored file. Must
-# capture the real np.reshape BEFORE reassigning np.reshape below - calling
-# `np.reshape` from inside the wrapper itself (instead of this captured
-# reference) recurses infinitely, since by then `np.reshape` IS this wrapper
-# (confirmed: this exact mistake was in place here and crashed with
-# `RecursionError` on the very first obstacle add call).
+# isaacsim.robot_motion.cumotion calls np.reshape(arr, shape=[...]), a NumPy 2.1+
+# kwarg not present in this install's bundled NumPy 1.26.4. Patched here, process-local
+# only. Must capture the real np.reshape before reassigning it below, or the wrapper recurses.
 _np_reshape = np.reshape
 
 
@@ -64,23 +53,17 @@ TOOL_FRAME_LIVE_PRIM_SUBPATH = "wrist_3_link/flange"
 UR20_DEFAULT_JOINT_POSITIONS = [1.5708, -1.5708, -1.5708, -1.5708, 1.5708, 3.1415]
 UR20_PRE_PLACE_JOINT_POSITIONS = [-1.5708, -1.5708, -1.5708, -1.5708, 1.5708, 3.1415]
 
-# Same pose as UR20_PRE_PLACE_JOINT_POSITIONS (shoulder_pan +-360deg apart,
-# within its +-2*pi range) but reached via +180deg instead of -90deg, so the
-# STAGE_FOR_PICK<->STAGE_FOR_PLACE swing arcs the other way round - confirmed
-# via FK probe that the direct joint-space path's midpoint swings toward
-# local -X normally, +X with this. Use for a robot with a neighbor on its -X
-# side (see MagicAttachPickPlace's pre_place_joint_positions param).
+# Same pose as UR20_PRE_PLACE_JOINT_POSITIONS but reached via +180deg instead of
+# -90deg, so the STAGE_FOR_PICK<->STAGE_FOR_PLACE swing arcs toward +X instead of -X.
+# Use for a robot with a neighbor on its -X side.
 UR20_PRE_PLACE_JOINT_POSITIONS_AWAY = [
     UR20_DEFAULT_JOINT_POSITIONS[0] + math.pi
 ] + UR20_PRE_PLACE_JOINT_POSITIONS[1:]
 
 
 def _local_z_axis_in_world(orientation_wxyz: np.ndarray) -> np.ndarray:
-    """Diagnostic helper: where does this quaternion's local +Z axis point in world frame?
-
-    Should read close to (0, 0, -1) if tool0 is actually oriented "straight
-    down" as intended - direct numeric confirmation rather than inferring
-    it from a screenshot or from position-error convergence alone.
+    """Diagnostic helper: where does this quaternion's local +Z axis point in world
+    frame? Should read close to (0, 0, -1) if tool0 is oriented straight down.
     """
     w, x, y, z = orientation_wxyz
     return np.array(
@@ -121,10 +104,14 @@ def _rotation_matrix_to_quaternion_wxyz(m: np.ndarray) -> np.ndarray:
         z = 0.25 * s
     return np.array([w, x, y, z])
 
-ATTACH_MAX_DISTANCE = 0.05  # meters (5 cm)
+ATTACH_MAX_DISTANCE = 0.005  # meters (0.5 cm)
 PICK_SETTLE_LINEAR_SPEED = 0.02  # m/s
-#Down is weird
+# Down is weird
 DOWN_ORIENTATION = np.array([-0.5, 0.5, -0.5, 0.5])
+
+# Extra clearance above the tallest neighboring box's top, beyond just-clear,
+# for LIFT_CLEAR (see Phase.LIFT_CLEAR) - tunable if boxes still get clipped.
+LIFT_CLEAR_MARGIN = 0.03  # meters
 
 
 def _quat_wxyz_to_xyzw(q: np.ndarray) -> np.ndarray:
@@ -142,10 +129,11 @@ PLACE_ORIENTATION = _quat_xyzw_to_wxyz(
     ).as_quat()
 )
 
-# Per-phase tick budget 
+# Per-phase tick budget
 PHASE_TICKS = {
     "STAGE_FOR_PICK": 600,
     "DESCEND_TO_PICK": 1200,
+    "LIFT_CLEAR": 600,
     "STAGE_FOR_PLACE": 600,
     "DESCEND_TO_PLACE": 1000,
 }
@@ -161,9 +149,10 @@ class Phase(IntEnum):
     STAGE_FOR_PICK = 1
     DESCEND_TO_PICK = 2
     ATTACH = 3
-    STAGE_FOR_PLACE = 4
-    DESCEND_TO_PLACE = 5
-    DETACH = 6
+    LIFT_CLEAR = 4
+    STAGE_FOR_PLACE = 5
+    DESCEND_TO_PLACE = 6
+    DETACH = 7
 
 
 def measure_box_half_height(box_path: str) -> float:
@@ -220,12 +209,8 @@ def _build_motion_planner(
     """Load the generated UR20 cuMotion config and wire up a collision-aware GraphBasedMotionPlanner.
 
     Args:
-        exclude_obstacle_paths: Prim paths to exclude from the obstacle set
-            scanned for collision avoidance - the robot itself and every box
-            that could ever be the pick/place target (a carried or
-            about-to-be-picked box must never register as an obstacle to
-            dodge, same as Isaac Sim's own cuMotion pick-and-place tutorial
-            excludes the cube it manipulates).
+        exclude_obstacle_paths: Prim paths to exclude from the obstacle set - the
+            robot itself and every box that could ever be a pick/place target.
     """
     cumotion_robot = load_cumotion_robot(directory=UR20_CONFIG_DIR)
     tool_frames = cumotion_robot.robot_description.tool_frame_names()
@@ -241,12 +226,9 @@ def _build_motion_planner(
     exclude_paths = list(exclude_obstacle_paths)
     max_attempts = 40
 
-    # Isaac Sim bug workaround (filed upstream, not fixed as of this writing):
-    # WorldBinding.initialize() wraps every tracked Mesh-type obstacle in an
-    # isaacsim.core.experimental.objects.Mesh (world_binding.py's
-    # _add_mesh_from_prim/_add_triangulated_mesh_from_prim), and that class
-    # defaults reset_xform_op_properties=True. reset_xform_op_properties()
-    # deletes xformOp:rotateXYZ
+    # Isaac Sim bug workaround (filed upstream): WorldBinding.initialize() resets
+    # xform ops on every tracked Mesh obstacle, dropping its rotation - snapshot and
+    # restore it below (rotation_guard_snapshot) around that call.
     rotation_guard_paths = (
         []
         if _DEBUG_DISABLE_OBSTACLE_TRACKING
@@ -308,17 +290,8 @@ def _build_motion_planner(
         for guard_path, original_local_quat in rotation_guard_snapshot.items():
             guard_prim = stage.GetPrimAtPath(guard_path)
             if guard_prim.IsValid() and "xformOp:orient" in guard_prim.GetPropertyNames():
-                # Match whatever precision xformOp:orient is actually
-                # authored at (Gf.Quatf vs Gf.Quatd) rather than assuming
-                # Quatd unconditionally - Usd.Attribute.Set() raises a type-
-                # mismatch Tf error otherwise on any guarded prim whose
-                # orient happens to be single-precision (confirmed against
-                # 5_conv_env.usd's SteelBoxTruck body mesh, authored as
-                # `quatf`; racetrack.usd apparently never exercised this
-                # restore path against a quatf-typed prim). GetRotation().GetQuat()
-                # above always returns a Quatd regardless of the source
-                # attribute's precision, so the mismatch is with THIS write,
-                # not the snapshot.
+                # Match the attribute's actual authored precision (Quatf vs Quatd) -
+                # Set() raises a type-mismatch error otherwise on single-precision prims.
                 orient_attr = guard_prim.GetAttribute("xformOp:orient")
                 quat_type = type(orient_attr.Get()) if orient_attr.Get() is not None else Gf.Quatd
                 orient_attr.Set(quat_type(original_local_quat))
@@ -337,18 +310,10 @@ def _build_motion_planner(
 class MagicAttachPickPlace:
     """Phase state machine: pick a box off the pick-zone belt, place it on the place-zone belt.
 
-    Call ``forward(pick_ready, box_path)`` once per physics step. The scene
-    can have multiple physics-enabled boxes cycling the pick loop (see
-    conveyor_indexer.py's KNOWN_BOX_PATHS), so the box to
-    track isn't fixed - `box_path` should be whichever prim's rigid body was
-    actually found occupying the pick zone (conveyor_indexer.py resolves this
-    via ConveyorZone.get_occupying_prim_paths()). Both args are only
-    consulted while WAITING. `box_rigid_prims` must contain a `RigidPrim`
-    pre-constructed for every box path that might ever appear, built once at
-    startup (before world.reset()) - constructing a fresh `RigidPrim` for an
-    arbitrary path mid-simulation was observed to return stale/wrong
-    get_world_poses() data on subsequent calls (same object, stationary box,
-    inconsistent readings a second apart), vs. reusing one built up front.
+    Call ``forward(pick_ready, box_path)`` once per physics step; both args are only
+    consulted while WAITING. `box_rigid_prims` must contain a `RigidPrim` pre-constructed
+    for every box path up front (before world.reset()) - building one fresh mid-simulation
+    was observed to return stale get_world_poses() data on subsequent calls.
     """
 
     def __init__(
@@ -359,6 +324,7 @@ class MagicAttachPickPlace:
         place_belt_top_z: float,
         box_rigid_prims: dict,
         physics_dt: float,
+        get_pick_zone_occupant_paths: Callable[[], list[str]],
         extra_exclude_obstacle_paths: list[str] = (),
         default_joint_positions: list[float] = UR20_DEFAULT_JOINT_POSITIONS,
         pre_place_joint_positions: list[float] = UR20_PRE_PLACE_JOINT_POSITIONS,
@@ -368,6 +334,9 @@ class MagicAttachPickPlace:
         self.place_belt_top_z = place_belt_top_z
         self.box_rigid_prims = box_rigid_prims
         self._physics_dt = physics_dt
+        # Used by LIFT_CLEAR to find which other boxes share the pick zone,
+        # since the carried box isn't a tracked collision object (see below).
+        self._get_pick_zone_occupant_paths = get_pick_zone_occupant_paths
         # See UR20_PRE_PLACE_JOINT_POSITIONS_AWAY for when to override these.
         self._default_joint_positions = default_joint_positions
         self._pre_place_joint_positions = pre_place_joint_positions
@@ -381,19 +350,13 @@ class MagicAttachPickPlace:
         link_names = list(robot.link_names)
         self._wrist_link_path = robot.link_paths[0][link_names.index(wrist_link_name)]
         self._tool_prim = GeomPrim(paths=f"{self._wrist_link_path}/{flange_subprim_name}")
-        # Fixed joint path is fixed for the object's lifetime - only ever one
-        # box attached at a time, created fresh at ATTACH and deleted at
-        # DETACH (see _attach_box/_detach_box).
+        # Created fresh at ATTACH, deleted at DETACH - only ever one box attached at a time.
         self._attach_joint_path = f"{self._wrist_link_path}/BoxAttachJoint"
 
-        # Depends on which box is being carried (set per-cycle below, since
-        # box_rigid_prims isn't guaranteed to hold same-size boxes) - box
-        # bottom flush on the belt means top-center (what the end
-        # effector targets, same convention as _pick_point) sits at
-        # belt_top_z + 2*box_half_height.
-        self.place_position: np.ndarray | None = None
+        self.place_position: np.ndarray | None = None  # set per-cycle below; depends on box height
 
         self.box: RigidPrim | None = None
+        self._box_path: str | None = None
         self._box_half_height: float | None = None
 
         self._phase = Phase.WAITING
@@ -401,64 +364,46 @@ class MagicAttachPickPlace:
         self._t = 0.0
         self._trajectory = None
         self._pick_point: np.ndarray | None = None
-        # Which of STAGE_FOR_PICK/STAGE_FOR_PLACE's two visits per cycle this
-        # is: False on the way to a descent, True on the way back up after
-        # ATTACH/DETACH (see forward()'s STAGE_FOR_PICK/STAGE_FOR_PLACE
-        # branches and module docstring).
-        self._holding_box = False
+        self._holding_box = False  # True from ATTACH until DETACH; see forward()
 
     def _box_top_center(self) -> np.ndarray:
         """Privileged query: the box's current world-space top-face center.
 
-        `get_world_poses()` returns the box's `xformOp:translate` origin,
-        which for these prims is its BOTTOM face, not its center - confirmed
-        directly against 5_conv_env.usd's authored data: e.g.
-        CubeBox_A04_26cm_PR_NVD_01's translate.z (1.7805...) exactly matches
-        ConveyorTrack's belt-top Z, not the ~0.13 m higher value a
-        center-origin box resting on that same belt would have. Adding only
-        `_box_half_height` therefore reaches the box's MIDDLE, not its top -
-        confirmed as the cause of a real bug (the tool descending into the
-        box rather than stopping at its top surface) observed running the
-        full scaffold. The full height (2x half_height) is what actually
-        reaches the top - matching the convention `place_position` already
-        uses for the equivalent "box's top surface height once its bottom
-        rests on the belt" calculation.
+        get_world_poses() returns the box's BOTTOM-face origin, not its center, so the
+        full height (not half) must be added to reach the top - same convention place_position uses.
         """
         position, _ = self.box.get_world_poses()
         bottom_center = position.numpy()[0]
         return bottom_center + np.array([0.0, 0.0, 2.0 * self._box_half_height])
 
+    def _lift_clear_target_z(self) -> float:
+        """Top-center Z the held box must reach to clear every other box still in this
+        pick zone by LIFT_CLEAR_MARGIN; returns the box's current Z if the zone is otherwise empty.
+        """
+        neighbor_paths = [p for p in self._get_pick_zone_occupant_paths() if p != self._box_path]
+        if not neighbor_paths:
+            return self._pick_point[2]
+        neighbor_top_zs = [
+            self.box_rigid_prims[p].get_world_poses()[0].numpy()[0][2] + 2.0 * measure_box_half_height(p)
+            for p in neighbor_paths
+        ]
+        return max(neighbor_top_zs) + LIFT_CLEAR_MARGIN + 2.0 * self._box_half_height
+
     def _tool_world_position(self) -> np.ndarray:
         return self._tool_prim.get_world_poses()[0].numpy()[0]
 
     def _attach_box(self) -> None:
-        """Rigidly attach self.box to wrist_3_link via a PhysX FixedJoint, so
-        it moves as a real extension of the arm's kinematic chain (position
-        AND orientation) rather than being teleported to a computed offset
-        every tick.
-
-        The box's rigid body was disabled since WAITING->MOVE_ABOVE_PICK (see
-        module docstring) - re-enabled here, in the same tick the joint is
-        created, so there's no gap where it could fall under gravity before
-        the joint constrains it.
+        """Rigidly attach self.box to wrist_3_link via a PhysX FixedJoint, so it moves as
+        a real extension of the arm rather than being teleported to a computed offset.
+        Re-enables the box's rigid body (disabled since WAITING) in the same tick the
+        joint is created, so there's no gap where it could fall under gravity first.
         """
         box_path = self.box.paths[0]
-        # Box's current pose expressed in wrist_3_link's local frame - the
-        # exact relative transform to preserve for the rest of the carry.
         relative_transform = xform_utils.get_relative_transform(box_path, self._wrist_link_path)
         local_pos0 = relative_transform[:3, 3]
-        # CubeBox_* prims carry a non-unity xformOp:scale:unitsResolve
-        # (0.01) in their own local transform chain, so this relative
-        # transform's rotation block isn't a pure rotation - each column is
-        # scaled, not unit-length. Left uncorrected, the box was observed
-        # snapping to a wrong (effectively the tool's own) orientation the
-        # instant the FixedJoint was created, instead of staying at
-        # whatever orientation it actually had when grasped - confirmed via
-        # running the full scaffold. Normalizing each column to unit length
-        # first (the scale is uniform/diagonal here, no shear, so this
-        # exactly removes it) recovers the true rotation before extracting
-        # the quaternion. Position isn't affected by this - only the
-        # rotation block carries the scale.
+        # CubeBox_* prims carry a non-unity xformOp:scale, so this transform's rotation
+        # block isn't unit-length; normalize each column before extracting the quaternion,
+        # or the box snaps to the wrong orientation when the FixedJoint is created.
         rotation_block = relative_transform[:3, :3]
         rotation_block = rotation_block / np.linalg.norm(rotation_block, axis=0, keepdims=True)
         local_rot0 = _rotation_matrix_to_quaternion_wxyz(rotation_block)
@@ -480,22 +425,16 @@ class MagicAttachPickPlace:
         joint.CreateLocalRot1Attr().Set(Gf.Quatf(1.0, Gf.Vec3f(0.0, 0.0, 0.0)))
 
     def _detach_box(self) -> None:
-        """Remove the FixedJoint created by _attach_box, releasing the box
-        (already a live rigid body since _attach_box) to fall/settle
+        """Remove the FixedJoint created by _attach_box, releasing the box to fall/settle
         naturally under gravity from wherever it currently is."""
         stage_utils.delete_prim(self._attach_joint_path)
 
     def _solve_ik_target(
         self, target_position: np.ndarray, orientation: np.ndarray, q_initial: np.ndarray
     ) -> np.ndarray:
-        """Solve for a single joint configuration reaching (target_position, orientation),
-        seeded at q_initial and biased toward the middle of each joint's range.
-
-        Gives plan_to_cspace_target a concrete destination to plan to, instead
-        of letting plan_to_pose_target's JtRRT settle on whatever
-        pose-satisfying (but possibly contorted) configuration its random
-        tree happens to reach first - see IK_CSPACE_LIMIT_BIASING_WEIGHT
-        comment above.
+        """Solve a single joint configuration reaching (target_position, orientation), seeded
+        at q_initial, so plan_to_cspace_target has a concrete destination instead of letting
+        plan_to_pose_target's JtRRT settle on a possibly contorted pose-satisfying configuration.
         """
         position_world_to_base, quaternion_world_to_base = (
             self.world_binding.get_world_interface().get_world_to_robot_base_transform()
@@ -534,21 +473,12 @@ class MagicAttachPickPlace:
         use_ik_cspace_target: bool = False,
         cspace_target: np.ndarray | list[float] | None = None,
     ) -> bool:
-        """Plan a fresh collision-free path to a target at phase entry, then play
-        back the resulting trajectory open-loop; return True once this phase
-        should end.
+        """Plan a fresh collision-free path to a target at phase entry, then play back the
+        resulting trajectory open-loop; return True once this phase should end.
 
-        Exactly one target flavor applies, in this order of precedence:
-          - cspace_target: plan_to_cspace_target directly to a known joint
-            configuration (e.g. UR20_DEFAULT_JOINT_POSITIONS /
-            UR20_PRE_PLACE_JOINT_POSITIONS) - target_position/orientation are
-            ignored.
-          - use_ik_cspace_target: solve IK to one concrete joint target first
-            (see _solve_ik_target), then plan_to_cspace_target to exactly
-            that configuration, instead of plan_to_pose_target's task-space
-            JtRRT.
-          - otherwise: plan_to_pose_target(target_position, orientation)
-            directly (task-space JtRRT).
+        Precedence: cspace_target plans directly to a known joint configuration;
+        use_ik_cspace_target solves IK first then plans to that joint target; otherwise
+        plans directly to (target_position, orientation) via task-space JtRRT.
         """
         if self._step == 0:
             self.world_binding.get_world_interface().update_world_to_robot_root_transforms(
@@ -625,39 +555,31 @@ class MagicAttachPickPlace:
         return False
 
     def forward(self, pick_ready: bool, box_path: str | None) -> None:
-        # No per-tick box-following code needed here anymore - once
-        # _attach_box() creates the FixedJoint, PhysX itself keeps the box
-        # rigidly following wrist_3_link (position and orientation) for the
-        # whole STAGE_FOR_PICK(carrying)/STAGE_FOR_PLACE/DESCEND_TO_PLACE carry.
+        # Once _attach_box() creates the FixedJoint, PhysX keeps the box rigidly
+        # following wrist_3_link on its own - no per-tick following code needed here.
 
         if self._phase == Phase.WAITING:
             if pick_ready and box_path is not None:
-                # Track whichever box actually triggered pick_ready - not
-                # necessarily the same one as last cycle (any box in
-                # box_rigid_prims can occupy this zone). Re-checked every physics
-                # tick while pick_ready holds, so this only actually commits
-                # once the box has settled (see PICK_SETTLE_LINEAR_SPEED).
+                # Track whichever box triggered pick_ready; only commits once it's
+                # settled (see PICK_SETTLE_LINEAR_SPEED).
                 candidate_box = self.box_rigid_prims[box_path]
                 linear_velocity, _ = candidate_box.get_velocities()
                 speed = float(np.linalg.norm(linear_velocity.numpy()[0]))
                 if speed >= PICK_SETTLE_LINEAR_SPEED:
                     return
                 self.box = candidate_box
+                self._box_path = box_path
                 self._box_half_height = measure_box_half_height(box_path)
                 self._pick_point = self._box_top_center()
-                # Disable the box's rigid body NOW, not at ATTACH - it must
-                # never be physically contactable by the approaching arm
-                # (see module docstring: this is what fixed the ~0.34 m
-                # attach-offset bug). It stays a frozen kinematic body,
-                # exactly at _pick_point, all the way through ATTACH.
+                # Disable the box's rigid body now (not at ATTACH) - it must never be
+                # physically contactable by the approaching arm.
                 self.box.set_enabled_rigid_bodies([False])
                 print(
                     f"[pick_and_place] DEBUG WAITING->STAGE_FOR_PICK: box_path={box_path} "
                     f"pick_point={self._pick_point} box_half_height={self._box_half_height} settled_speed={speed}",
                     flush=True,
                 )
-                # Same top-center convention as _pick_point, recomputed here
-                # since this box's height may differ from the last one placed.
+                # Recomputed here since this box's height may differ from the last one placed.
                 self.place_position = np.array(
                     [self.place_xy[0], self.place_xy[1], self.place_belt_top_z + 2 * self._box_half_height]
                 )
@@ -665,12 +587,8 @@ class MagicAttachPickPlace:
                 self._step = 0
 
         elif self._phase == Phase.STAGE_FOR_PICK:
-            # Plain joint-space move to a known, mid-range posture (see
-            # UR20_DEFAULT_JOINT_POSITIONS) - visited twice per cycle (see
-            # _holding_box/module docstring): first as the staging point
-            # before DESCEND_TO_PICK's reach, then again right after ATTACH
-            # to lift the (now carried) box back up through the same pose,
-            # before handing off to STAGE_FOR_PLACE.
+            # Visited twice per cycle: as the staging point before DESCEND_TO_PICK, and
+            # again right after ATTACH to lift the carried box back up through the same pose.
             if self._drive_to(None, "STAGE_FOR_PICK", cspace_target=self._default_joint_positions):
                 self._phase = Phase.STAGE_FOR_PLACE if self._holding_box else Phase.DESCEND_TO_PICK
 
@@ -685,16 +603,24 @@ class MagicAttachPickPlace:
                 self._phase = Phase.ATTACH
 
         elif self._phase == Phase.ATTACH:
-            # Gated on real proximity, not a tick count: only create the
-            # FixedJoint once the tool is actually at the package (see
-            # ATTACH_MAX_DISTANCE) - DESCEND_TO_PICK's planned trajectory
-            # finishing is a strong signal but not a guarantee (planning or
-            # tracking error could leave it short).
+            # Gated on real proximity, not a tick count - DESCEND_TO_PICK finishing is a
+            # strong signal but not a guarantee.
             distance = float(np.linalg.norm(self._tool_world_position() - self._pick_point))
             if distance <= ATTACH_MAX_DISTANCE:
                 self._attach_box()
                 self._holding_box = True
+                self._phase = Phase.LIFT_CLEAR
+
+        elif self._phase == Phase.LIFT_CLEAR:
+            # Straight up first: the carried box isn't a tracked collision object, so this
+            # clears it past other boxes in the pick zone by hand rather than via the planner.
+            target_z = self._lift_clear_target_z()
+            if target_z <= self._pick_point[2]:
                 self._phase = Phase.STAGE_FOR_PICK
+            else:
+                lift_target = np.array([self._pick_point[0], self._pick_point[1], target_z])
+                if self._drive_to(lift_target, "LIFT_CLEAR", use_ik_cspace_target=True):
+                    self._phase = Phase.STAGE_FOR_PICK
 
         elif self._phase == Phase.STAGE_FOR_PLACE:
             if self._drive_to(None, "STAGE_FOR_PLACE", cspace_target=self._pre_place_joint_positions):

@@ -1,15 +1,9 @@
-"""Standalone Isaac Sim script: zone-accumulation indexing over the inbuilt
-surface-velocity conveyors in ~/5_conv_env.usd - two short, OPEN (non-looping)
-conveyor lines rather than racetrack.usd's closed ovals - with per-tick data
-logging for later imitation/RL training, plus a UR20 pick-and-place (driven
-by NVIDIA cuMotion RMPflow) that moves boxes from loop 1 to loop 2, which
-then carries them off its far end into a waiting SteelBoxTruck.
+"""Zone-accumulation indexing over 5_conv_env.usd's two open conveyor lines, with
+per-tick logging and a UR20 pick-and-place (cuMotion RMPflow) moving boxes from
+loop 1 to loop 2 and into a waiting SteelBoxTruck.
 
-Run with Isaac Sim's bundled python, e.g.:
-    ./python.sh ~/conveyor_indexing/conveyor_indexer.py
-
-See README.md in this directory for setup (protobuf codegen), and everything
-this scaffold does NOT implement yet.
+Run with Isaac Sim's bundled python: ./python.sh ~/conveyor_indexing/conveyor_indexer.py
+See README.md for setup and known gaps.
 """
 
 from __future__ import annotations
@@ -50,37 +44,18 @@ from pick_and_place import create_pedestal_and_robot, MagicAttachPickPlace, UR20
 
 STAGE_PATH = os.path.join(os.path.expanduser("~"), "5_conv_env.usd")
 LOG_OUTPUT_DIR = os.path.join(REPO_DIR, "data")
-# Matches the 120Hz physics rate - occupancy detection and hold-zone stop
-# commands used to only run at 30Hz, letting a box drift up to 1/30s past
-# where it should've been caught before the belt reacted.
-CONTROL_HZ = 120.0
+CONTROL_HZ = 120.0  # matches physics rate; 30Hz let boxes drift past hold points before the belt reacted
 DEBUG_LOG_OCCUPANCY_HITS = False  # set True to print which prim triggers each occupancy hit
 DEBUG_LOG_HOLD_ZONE_STATE = False  # set True to print every hold zone's state machine each control tick
 
-# 5_conv_env.usd references 5 distinct assets (the conveyor belt, the truck,
-# and 3 box variants - each referenced multiple times) from the public
-# Omniverse S3 content bucket over HTTPS; opening the stage re-fetches them
-# over the network every run unless localized. `download_assets.py` (see
-# README) mirrors the full recursive dependency tree of everything under
-# REMOTE_ASSET_ROOT into LOCAL_ASSET_ROOT, preserving the bucket's own
-# relative directory structure - confirmed (by mirroring, then re-resolving
-# every reference in the scene against the mirror) to be a clean string-
-# prefix swap, no other path rewriting needed. See
-# _localize_asset_references, which performs that swap at runtime.
+# 5_conv_env.usd fetches its assets from this public S3 bucket over HTTPS every run unless
+# localized; download_assets.py (see README) mirrors them locally. See _localize_asset_references.
 REMOTE_ASSET_ROOT = "https://omniverse-content-production.s3-us-west-2.amazonaws.com/"
 LOCAL_ASSET_ROOT = os.path.join(os.path.expanduser("~"), "isaac_assets")
 
-# ---------------------------------------------------------------------------
-# Zone tables - two independent OPEN (non-looping) lines, confirmed via
-# direct world-bbox inspection of 5_conv_env.usd: loop 1 (ConveyorTrack/_01/_02)
-# runs along Y=0, loop 2 (ConveyorTrack_09/_10) runs along Y~2.186, both
-# spanning the same X range and both straight-only (no curved zones, unlike
-# racetrack.usd's ovals). Loop 2's far end (ConveyorTrack_10's -X edge) sits
-# right at the near wall of `/World/SteelBoxTruck_A01_01`, whose bed sits
-# ~0.83 m below belt-top height - boxes that reach the end of loop 2 are
-# meant to run off the belt and drop into the truck bed, not hand off to
-# another zone.
-# ---------------------------------------------------------------------------
+# Two independent open (non-looping) lines: loop 1 runs along Y=0, loop 2 along Y~2.186.
+# Loop 2's far end sits at the near wall of SteelBoxTruck_A01_01; boxes run off the belt
+# there and drop into the truck bed rather than handing off to another zone.
 ZONE_NODE_PATHS_LOOP1 = [
     "/World/ConveyorTrack/ConveyorBeltGraph/ConveyorNode",
     "/World/ConveyorTrack_01/ConveyorBeltGraph/ConveyorNode",
@@ -91,13 +66,9 @@ ZONE_NODE_PATHS_LOOP2 = [
     "/World/ConveyorTrack_10/ConveyorBeltGraph/ConveyorNode",
 ]
 
-# ConveyorTrack_01 (loop 1) and ConveyorTrack_09 (loop 2) directly face each
-# other across the gap (both centered at local X=-3) - the natural spot for a
-# fixed pick/place robot between the two loops. ConveyorTrack_02, the third
-# loop-1 zone, sits at X=-5 - out of a UR20's reach from that same robot
-# position, so it's left as an (unused) upstream buffer; every box starts the
-# run already stacked on ConveyorTrack (zone 0), one line-length from the
-# pick zone.
+# ConveyorTrack_01/_09 face each other at local X=-3 - the natural spot for a fixed
+# pick/place robot. ConveyorTrack_02 (X=-5) is out of a UR20's reach from there, so
+# it's left as an unused upstream buffer.
 PICK_ZONE_INDEX = 1  # ConveyorTrack_01 within ZONE_NODE_PATHS_LOOP1
 PLACE_ZONE_INDEX = 0  # ConveyorTrack_09 within ZONE_NODE_PATHS_LOOP2
 
@@ -112,108 +83,40 @@ ROBOT_PATH_2 = "/World/PickPlaceRobot_02"
 PEDESTAL_PATH_2 = "/World/PickPlacePedestal_02"
 TRUCK_PATH = "/World/SteelBoxTruck_A01_01"
 
-# 5_conv_env.usd's `/World/GroundPlane/CollisionPlane` is a genuine
-# UsdGeom.Plane-typed prim with PhysicsCollisionAPI (unlike racetrack.usd's
-# ground, which apparently has no such prim - this scaffold never hit this
-# path against that scene) - `_build_motion_planner`'s obstacle scan picks it
-# up and classifies it as an `ObstacleRepresentation.PLANE` obstacle via
-# `get_shape_type()`'s `Plane.are_of_type()` check, which routes into
-# `WorldBinding._add_plane_from_prim` -> `CumotionWorldInterface.add_planes`.
-# That code path is broken independent of anything in this scaffold -
-# confirmed via direct traceback: `add_planes` hits pick_and_place.py's own
-# `np.reshape` compat shim (see its module docstring - a real, separate
-# NumPy 1.26/2.1 API mismatch), and that shim recurses into itself
-# (`RecursionError: maximum recursion depth exceeded`) rather than calling
-# through to the real `np.reshape` - a second, independent bug in the shim
-# itself (not yet root-caused), not something introduced here. The ground
-# plane doesn't need cuMotion obstacle avoidance anyway (the arm, mounted on
-# a 1.6 m pedestal, never reaches down into it), so it's excluded from
-# obstacle tracking via MagicAttachPickPlace's `extra_exclude_obstacle_paths`
-# rather than chasing the recursion bug itself.
+# The ground plane's collider breaks cuMotion's obstacle scan (recursion bug in
+# pick_and_place.py's np.reshape shim); excluded via extra_exclude_obstacle_paths instead.
 GROUND_PLANE_COLLISION_PATH = "/World/GroundPlane/CollisionPlane"
 
-# 5_conv_env.usd already ships its own pallet of ~18 CubeBox_* prims
-# pre-authored directly on top of ConveyorTrack's belt (confirmed via
-# world-bbox inspection: every one sits within ConveyorTrack's belt-top XY
-# footprint, stacked in two Z layers) - unlike racetrack.usd, which ships
-# with no boxes at all and needed them referenced in at runtime. So this
-# scaffold discovers whatever CubeBox_* prims are actually present
-# (_discover_box_prim_paths) rather than spawning a fixed count itself.
-#
-# Those prims are pure visual payloads with no physics schemas at all
-# (confirmed: HasAPI(UsdPhysics.RigidBodyAPI) / CollisionAPI both False on
-# every one) - unlike racetrack.usd's sm_box_multiDepth_brown_b08_01
-# references, which carry physics baked into the referenced asset itself.
-# _apply_box_physics() adds RigidBodyAPI + convex-hull CollisionAPI + a mass
-# at runtime, the same "don't edit the source USD" convention this scaffold
-# already uses for _deactivate_frame_meshes etc.
+# 5_conv_env.usd ships ~18 pre-placed CubeBox_* prims with no physics schemas of their
+# own; discovered at runtime (_discover_box_prim_paths) and given physics by _apply_box_physics.
 BOX_PRIM_NAME_PREFIX = "CubeBox_"
 
-# Approximate cardboard-box-with-contents density (kg/m^3), used to derive
-# each box's mass from its own bbox volume in _apply_box_physics. Real
-# corrugated cardboard alone is far lighter than this - this is a plausible
-# ballpark for a lightly-packed shipping box, not a measured value, since
-# 5_conv_env.usd doesn't author a mass for these at all.
-BOX_DENSITY_KG_PER_M3 = 150.0
+BOX_DENSITY_KG_PER_M3 = 150.0  # plausible ballpark for a packed shipping box; not measured
 
-# The pallet's two Z layers are spaced ~0.29 m apart (confirmed via bbox
-# inspection), but the tallest box variant (CubeBox_A06, 42 cm) doesn't fit
-# in that clearance - so at least some boxes start out physically
-# interpenetrating their neighbors the instant RigidBodyAPI is applied.
-# Without a cap, PhysX's depenetration resolves that overlap as a large
-# one-tick separating impulse - confirmed empirically: every box ended up
-# flung clear of the belt entirely (bizarre positions like world X > 0, well
-# past the conveyor's own -6..0 footprint, motionless on the bare ground
-# for the rest of the run) rather than just jostling apart. Capping each
-# box's own `physxRigidBody:maxDepenetrationVelocity` bounds how fast PhysX
-# is allowed to push overlapping bodies apart per step, turning that into a
-# gradual, physically plausible separation over the first second or so
-# instead of an explosion - standard PhysX practice for bodies that may
-# start out overlapping, not a 5_conv_env.usd-specific hack.
+# Caps how fast PhysX may push overlapping bodies apart per step. Some boxes start out
+# interpenetrating (pallet Z-layer spacing is tighter than the tallest box variant);
+# without this cap PhysX's depenetration impulse flung boxes clean off the belt.
 BOX_MAX_DEPENETRATION_VELOCITY = 0.5  # m/s
 
-# Value of each track's `graph:variable:Velocity` (see ConveyorZone.apply_command)
-# when a zone is commanded to run at 100% speed. Matches racetrack.usd's
-# value (confirmed empirically there: a box transitions into/through a
-# curved track without flying off at this speed). Each loop here instead
-# dials its own actual run speed down from this via LOOP1_RUN_SPEED_PCT /
-# LOOP2_RUN_SPEED_PCT - see those constants.
+# Zone velocity at 100% speed; each loop scales its actual run speed down from this via
+# LOOP1_RUN_SPEED_PCT / LOOP2_RUN_SPEED_PCT.
 ZONE_RUN_VELOCITY = 2.0
 
-# Loop 1 (the pick side) at full speed conveys boxes into the pick zone
-# faster than really needed for a comfortable watch/pick cadence - slowed
-# down per explicit direction after watching the full scaffold run live.
-# NOTE: an earlier attempt at a bigger global slowdown (effectively 1.0 m/s
-# on both loops, via ZONE_RUN_VELOCITY itself) caused the arm's ATTACH phase
-# (which has no timeout, by design - see pick_and_place.py) to get stuck
-# indefinitely, never quite converging within ATTACH_MAX_DISTANCE of a
-# settling box. Not fully root-caused; if this speed reproduces that, the
-# real fix is likely a timeout/fallback for ATTACH itself rather than
-# avoiding slower belt speeds.
-LOOP1_RUN_SPEED_PCT = 55  # was 60; nudged down for more stopping margin at ConveyorTrack_02
+# Slowed for a comfortable pick cadence. A bigger global slowdown (~1.0 m/s) previously
+# stalled the arm's no-timeout ATTACH phase indefinitely - not fully root-caused.
+LOOP1_RUN_SPEED_PCT = 55
 
-# Loop 2's own goal differs from loop 1's: a box should run off
-# ConveyorTrack_10's end and land INSIDE the waiting truck's bed, not
-# overshoot it. Confirmed empirically at full speed (ZONE_RUN_VELOCITY,
-# 2.0 m/s): boxes cleared the truck's far wall entirely and landed on the
-# ground beyond it (a box leaving the belt at speed v, falling from belt-top
-# to the bed floor, travels roughly v * fall_time horizontally - at 2.0 m/s
-# that distance exceeded the truck's own ~0.77 m depth). This speed is
-# confirmed working (landed cleanly in the truck) - left as-is per explicit
-# direction ("the speed going into the truck is fine").
+# Tuned so boxes land inside the truck bed instead of overshooting it (at full speed
+# they cleared the truck's far wall and landed on the ground beyond it).
 LOOP2_RUN_SPEED_PCT = 50
 
-# Both loops in 5_conv_env.usd are already authored close enough for a UR20
-# (1.75 m spec reach - see robot_configs/ur20/, generated via cuMotion) to
-# bridge without any runtime repositioning: ConveyorTrack_01 (loop 1 pick
-# zone) and ConveyorTrack_09 (loop 2 place zone) are both centered at local
-# X=-3, with loop 1's belt-near-edge at Y=0.45 and loop 2's at Y=1.736 - a
-# robot at the Y midpoint reaches each at ~1.09 m, well inside spec (this
-# mirrors the reach-balancing racetrack.usd needed LOOP2_Y_SHIFT for with a
-# UR10, but here the un-shifted geometry already fits a UR20 comfortably).
+# Both loops already sit close enough for the UR20 (1.75m reach) at the Y midpoint
+# without any runtime repositioning.
 ROBOT_POSITION = (-3.0, 1.0928, 0.0)  # (x, y, z-of-ground-contact); Y = loop midpoint
 PEDESTAL_HEIGHT = 1.6
 PLACE_XY = (-3.0, 2.1857)  # ConveyorTrack_09's belt-top Y center
+
+PICK_MAX_REACH_M = 1.75  # UR20 spec reach; pick targets farther than this are dropped
 
 CONVEYOR_TRACK_ROOTS = ("/World/ConveyorTrack", "/World/ConveyorTrack_01", "/World/ConveyorTrack_02", "/World/ConveyorTrack_09", "/World/ConveyorTrack_10")
 
@@ -249,11 +152,8 @@ class ConveyorZone:
         world_bound = bbox_cache.ComputeWorldBound(self.belt_prim)
         aligned_range = world_bound.ComputeAlignedRange()
         size = aligned_range.GetSize()
-        # `self.belt_prim` ("Belt") is just the thin moving-surface mesh, not
-        # the full occupying box's volume - using its own (near-zero) Z
-        # extent for the occupancy query missed boxes resting on top by even
-        # a hair's-width contact gap. Query a generous column above the belt
-        # top instead, tall enough for any box variant in this scene.
+        # Belt mesh has near-zero Z extent; query a column above it instead so
+        # boxes resting on top are actually caught by the occupancy check.
         belt_top_z = aligned_range.GetMax()[2]
         occupancy_query_half_height = 0.5  # meters; tallest known box is ~0.42m
         self.bbox_half_extent = [size[0] * 0.5, size[1] * 0.5, occupancy_query_half_height]
@@ -261,85 +161,31 @@ class ConveyorZone:
         # Belts are treated as axis-aligned and static; identity rotation.
         self._quat = carb.Float4(0.0, 0.0, 0.0, 1.0)
 
-        # `inputs:velocity` on every ConveyorNode is wired (via a ReadVariable
-        # node) to this per-track OmniGraph variable rather than holding a
-        # plain value - confirmed by inspecting the ConveyorBeltGraph's
-        # `inputs:velocity` connections. It is unauthored on every track in
-        # racetrack.usd (no WriteVariable node anywhere sets it either), so
-        # OgnIsaacConveyor's `targetVelocity = direction * velocity` was
-        # always (0,0,0) regardless of `enabled` - confirmed by enabling a
-        # belt and reading back its actual PhysxSurfaceVelocityAPI value
-        # after stepping physics. `apply_command` must author this directly.
+        # inputs:velocity is wired via a ReadVariable node to this per-track OmniGraph
+        # variable rather than holding a plain value; apply_command authors it directly.
         self.velocity_var_attr = self.node_prim.GetParent().GetAttribute("graph:variable:Velocity")
         if not self.velocity_var_attr:
             raise RuntimeError(f"{node_path}'s graph has no graph:variable:Velocity")
 
-        # `inputs:direction` (unlike Velocity) IS authored per-track in
-        # racetrack.usd. Straight zones store a flat (z=0) unit translation
-        # vector, and direct stage inspection found ConveyorTrack/_01/_02 (one
-        # straight leg of the oval) baked with the SAME (1,0,0) as
-        # ConveyorTrack_04/_05/_06 (the return leg), despite ConveyorTrack/_01/_02's
-        # bodies being rotated 180 deg about Z in world space relative to
-        # _04/_05/_06's identity rotation. An earlier pass here assumed this meant
-        # `inputs:direction` needed a compensating negation for the flipped row
-        # (`physxSurfaceVelocity:surfaceVelocityLocalSpace` defaults True, so the
-        # assumption was that PhysX consumes this vector in the belt's own body
-        # frame) - visually confirmed WRONG by running the full scaffold: with
-        # that negation applied, the flipped row ran clockwise (backwards) while
-        # the unflipped row and both curves ran counterclockwise correctly. PhysX
-        # does not need this vector pre-compensated for the belt's own world
-        # rotation; the same raw (1,0,0) on both rows, authored as-is, is what's
-        # actually correct here (see ConveyorLineController._fix_zone_directions).
-        # Curved zones store a
-        # nonzero-z angular-velocity axis instead - same magnitude (37) on all 4
-        # curves in both loops, self-consistent but never actually validated
-        # against this scaffold's own ZONE_RUN_VELOCITY scaling. Confirmed via a
-        # standalone headless test (enable one curve, drop a box, read back its
-        # world position every physics tick): 37 combined with apply_command's
-        # velocity scaling authors a ~74 rad/s angular velocity - for this curve's
-        # ~1.5 m turn radius that launches an occupying box clean off the belt on
-        # first contact instead of conveying it (the box's world position jumped
-        # >2 m within half a second). The correct magnitude for this radius at
-        # ZONE_RUN_VELOCITY is closer to 1.3 rad/s.
-        # See ConveyorLineController._fix_zone_directions, which recomputes
-        # straight-zone direction from actual belt geometry once every zone's
-        # bbox_center is known (confirmed to reconstruct these same baked values
-        # given the rotations above) and, for curved zones, rederives both the
-        # angular-velocity magnitude AND sign from the curve's actual geometry -
-        # the sign can't just be copied from the baked value either, despite both
-        # curves in a loop baking the identical -37: see that method's own
-        # docstring for why (the two curves are mirror-image ends of the same
-        # racetrack, so the same absolute spin sense is forward at one end and
-        # backward at the other) - kept as the more robust geometry-derived
-        # source rather than relying on the authored data staying
-        # correct/well-scaled if the scene layout ever changes.
+        # inputs:direction is a unit vector for straight zones, an angular-velocity axis for
+        # curved ones. The baked values aren't reliable (wrong sign/magnitude in places); see
+        # ConveyorLineController._fix_zone_directions, which rederives both from geometry.
         self.direction_attr = self.node_prim.GetAttribute("inputs:direction")
         baked_direction = self.direction_attr.Get()
         self.is_straight = baked_direction is not None and baked_direction[2] == 0.0
 
-        # Set by ConveyorLineController._fix_zone_directions for straight
-        # zones: the WORLD-space unit direction of travel, same vector as
-        # direction_attr for straight zones (see that method's docstring -
-        # no body-frame compensation is applied). Kept as its own field
-        # rather than having is_past_center read direction_attr directly
-        # since is_past_center is only ever meaningful for straight zones,
-        # while direction_attr is also set (to a different kind of vector -
-        # an angular-velocity axis) for curved ones.
+        # World-space travel direction for straight zones; set by _fix_zone_directions,
+        # only meaningful there (used by is_past_center).
         self.world_travel_direction: Gf.Vec3f | None = None
 
         self.state_machine = ConveyorZoneStateMachine(name=node_path, run_speed_pct=run_speed_pct)
         self.state_machine.start()
 
     def get_occupying_prim_paths(self) -> list:
-        """Return the paths of every non-excluded rigid body overlapping this zone.
+        """Return paths of every non-excluded rigid body overlapping this zone.
 
-        Used both for the boolean occupied check and, for the pick zone
-        specifically, to identify WHICH box is actually present - there are
-        ~18 physics-enabled boxes on the line (see _discover_box_prim_paths),
-        and picking must track whichever one actually triggered `pick_ready`,
-        not a hardcoded path (a fixed path silently tracks the wrong box, and
-        the wrong box, whenever it happens to be, the moment it's "detached"
-        ends up wherever the arm's current position, unrelated to the belt).
+        Used for the boolean occupied check and, for the pick zone, to identify
+        WHICH box actually triggered pick_ready rather than a hardcoded path.
         """
         hits = []
 
@@ -363,22 +209,9 @@ class ConveyorZone:
         return len(self.get_occupying_prim_paths()) > 0
 
     def is_past_center(self, world_position, stop_fraction: float = 0.5) -> bool:
-        """True once world_position has reached/passed the stop point that's
-        `stop_fraction` of the way through this straight zone along its
-        direction of travel (0.5 = geometric midpoint).
-
-        Used by the hold zone(s) to settle an occupying part at a fixed,
-        robot-reachable point instead of wherever it first entered the
-        zone's occupancy sensor. Only meaningful for straight zones - the
-        one caller (ConveyorLineController.step, for zones in
-        hold_zone_indices) never uses this on a curved zone.
-
-        Uses world_travel_direction (set by
-        ConveyorLineController._fix_zone_directions), NOT
-        direction_attr - the latter is a LOCAL-frame vector once corrected
-        for PhysX, and using its sign directly against world_position would
-        be backwards on any zone whose body isn't identity-rotated in world
-        space (see world_travel_direction's own comment in __init__).
+        """True once world_position has passed stop_fraction of the way through this
+        straight zone along world_travel_direction (0.5 = midpoint). Used by hold
+        zones to settle an occupying part at a fixed, robot-reachable point.
         """
         travel = self.world_travel_direction
         assert travel is not None, f"{self.node_path}: is_past_center called before world_travel_direction was set"
@@ -390,20 +223,11 @@ class ConveyorZone:
     def apply_command(self, run: bool, speed_pct: int) -> None:
         self.node_prim.GetAttribute("inputs:enabled").Set(run)
         if run:
-            # direction is baked in per-track (unit vector for straight
-            # belts, an angular-velocity axis scaled for the local curve
-            # radius for curved ones) so the same Velocity value works for
-            # both; only its magnitude is set here.
+            # Direction is baked in per-track; only magnitude is set here.
             self.velocity_var_attr.Set(ZONE_RUN_VELOCITY * speed_pct / 100.0)
         else:
-            # `inputs:enabled=False` alone does NOT stop the belt: OgnIsaacConveyor's
-            # compute() early-returns on disabled without ever touching the belt's
-            # PhysxSurfaceVelocityAPI attributes, so the last nonzero surface
-            # velocity stays authored and PhysX keeps driving the belt regardless of
-            # `enabled` - confirmed by reading OgnIsaacConveyor.cpp. Zero it directly
-            # here; re-enabling needs no corresponding restore, since the node's own
-            # hasVelocityChanged check (currentVelocity=0 vs its target) will rewrite
-            # the correct nonzero velocity on the next tick where enabled=True again.
+            # enabled=False alone doesn't stop the belt (OgnIsaacConveyor leaves the
+            # last nonzero surface velocity authored) - zero it directly instead.
             surface_velocity_api = PhysxSchema.PhysxSurfaceVelocityAPI.Apply(self.belt_prim)
             zero = Gf.Vec3f(0.0, 0.0, 0.0)
             surface_velocity_api.GetSurfaceVelocityAttr().Set(zero)
@@ -413,10 +237,8 @@ class ConveyorZone:
 class ConveyorLineController:
     """Owns one line's ordered zones, wires neighbor occupancy, applies commands.
 
-    Supports both a closed loop (racetrack.usd's ovals, wrapping neighbor
-    index i-1/i+1 around modulo the zone count) and an open line
-    (5_conv_env.usd's two short straight runs, where the first zone has no
-    real upstream and the last has no real downstream) via `closed_loop`.
+    Supports both a closed loop (neighbor indices wrap) and an open line (first
+    zone has no upstream, last has no downstream) via `closed_loop`.
     """
 
     def __init__(
@@ -433,98 +255,42 @@ class ConveyorLineController:
         self.occupied: list = [False] * len(self.zones)
         self.machine_states: list = [None] * len(self.zones)
         self._box_rigid_prims: dict | None = None
-        # Per-hold-zone robot-readiness callback - see set_hold_zone_ready_check.
-        # Absent means always-ready (unconditional hold, the original behavior).
-        self._hold_zone_ready_checks: dict = {}
+        self._hold_zone_ready_checks: dict = {}  # zone_index -> ready_fn; absent = always-ready
         self._fix_zone_directions()
 
     def set_hold_zone_ready_check(self, zone_index: int, ready_fn) -> None:
-        """While `ready_fn()` (zero-arg, returns bool) is True, hold zone
-        `zone_index` holds its occupant as before. While False (that robot
-        is busy), it behaves like an ordinary pass-through zone instead, so
-        a box overflows to the next pick station rather than backing up
-        behind a busy robot - needed once two hold zones share one line.
+        """While ready_fn() is False (that zone's robot is busy), hold zone zone_index
+        behaves like an ordinary pass-through zone, so a box overflows to the next
+        pick station instead of backing up behind a busy robot.
         """
         self._hold_zone_ready_checks[zone_index] = ready_fn
 
     def set_box_rigid_prims(self, box_rigid_prims: dict) -> None:
-        """Give this controller the live RigidPrim for every known box, so
-        hold_zone_indices zones can check is_past_center() against the
-        occupying box's actual position. Built in main() only after
-        world.reset() (see main()'s ordering comments), so it's injected
-        here rather than passed to __init__.
+        """Inject the live RigidPrim for every known box (built in main() only after
+        world.reset()) so hold zones can check is_past_center() against real position.
         """
         self._box_rigid_prims = box_rigid_prims
 
     @staticmethod
     def _is_body_flipped(belt_prim) -> bool:
-        """True if belt_prim's world rotation is ~180deg about some axis.
-
-        `physxSurfaceVelocity:surfaceVelocityLocalSpace` defaults True, so
-        `inputs:direction` is consumed in the belt's own BODY frame, not world
-        space - this tells callers whether that body frame is flipped relative
-        to world space and needs compensating for.
+        """True if belt_prim's world rotation is ~180deg about some axis (i.e. its
+        body frame is flipped relative to world space).
         """
         world_rotation = UsdGeom.Xformable(belt_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default()).ExtractRotation()
         return abs(world_rotation.GetQuat().GetReal()) < 0.5
 
     def _fix_zone_directions(self) -> None:
-        """Overwrite every zone's inputs:direction from actual belt geometry.
+        """Overwrite every zone's inputs:direction from actual belt geometry - the
+        baked values aren't reliable (see ConveyorZone.__init__).
 
-        Needed because racetrack.usd's authored directions aren't reliable (see
-        ConveyorZone.__init__).
-
-        Straight zones: derives the correct unit vector from this zone's
-        bbox_center to the next zone's (i -> i+1, wrapping around the closed loop),
-        snapped to whichever axis the belt is actually elongated along, since a
-        straight belt only ever needs to move along its own long axis and blending
-        in the other axis (e.g. from a curved neighbor's offset bbox_center) would
-        put a wrong lateral component into an otherwise axis-aligned belt. This
-        world-space vector is authored directly as `inputs:direction`, with NO
-        per-body negation for flipped (180deg-about-Z) rows despite
-        `physxSurfaceVelocity:surfaceVelocityLocalSpace` defaulting True - an
-        earlier version of this method assumed that flag meant `inputs:direction`
-        needed compensating for each belt's own world rotation (negating for
-        ConveyorTrack/_01/_02, loop 1's flipped near row), which happened to
-        reconstruct the same values already baked in racetrack.usd and so looked
-        confirmed at the time. Visually running the full scaffold (pick-and-place
-        enabled, 5 boxes) proved that assumption backwards: the flipped near row
-        (both loops' ConveyorTrack/_01/_02 and _08/_09/_10) ran CLOCKWISE - the
-        wrong way - while the unflipped far row and both (correctly-signed, see
-        below) curves ran counterclockwise correctly. PhysX evidently does not
-        need `inputs:direction` pre-compensated for the belt's own world rotation
-        here; authoring the plain world-space vector on every straight zone,
-        flipped row or not, is what actually matches the rest of the loop.
-
-        Curved zones: rederives the angular-velocity magnitude from the curve's
-        own radius - half the distance between its two straight neighbors' bbox
-        centers - so the resulting tangential speed (omega * radius) matches
-        ZONE_RUN_VELOCITY at 100%, same as the straight zones' linear speed. See
-        ConveyorZone.direction_attr's own comment for why this matters: the baked
-        magnitude (37, uncorrected) is roughly 55x too large for this scaffold's
-        velocity scaling and launches an occupying box off the belt outright.
-
-        The sign, by contrast, can NOT just be copied from the baked value even
-        though both curves in a loop bake the identical (0, 0, -37): the two
-        curves sit at mirror-image ends of the same racetrack (confirmed via
-        bbox inspection - e.g. loop 1's _03 at x=-6.97 vs _07 at x=+0.97,
-        straddling the two straight rows), so the SAME absolute spin sense is
-        forward at one end and backward at the other, the same way a real
-        racetrack's two turntable-style end caps would need to counter-rotate to
-        send an item the same way around the whole loop. Confirmed via a full
-        run of this scaffold (pick-and-place enabled, all 5 boxes, PICK_ZONE
-        occupancy logged every tick): with the sign simply copied from the baked
-        value, the box placed on loop 2 traveled correctly through zone9 into
-        zone8, then stalled dead at the zone8/_15 boundary for 20+ seconds
-        instead of continuing into the curve, while a loop-1 box run the same way
-        traveled BACKWARDS through _07 (from zone0 toward zone6 - the wrong way
-        for the i -> i+1 model every zone's occupancy/handoff logic assumes) even
-        though _03 conveyed correctly with that same copied sign. The reliable
-        per-curve discriminator, confirmed against both loops: whether the
-        curve's OWN entry-side neighbor (i-1) is itself flipped - _03's entry
-        neighbor (zone2) is flipped and _03's baked sign works as-is; _07's entry
-        neighbor (zone6) is NOT flipped and _07's baked sign needs negating.
-        Loop 2's _11/_15 mirror this exactly (entry neighbors zone10/zone14).
+        Straight zones: unit vector from this zone's bbox_center toward the next
+        zone's, snapped to the belt's long axis, authored as-is in world space (no
+        per-body flip negation - confirmed empirically the wrong way round). Curved
+        zones: angular-velocity magnitude rederived from the curve's own radius (the
+        baked value is far too large for this scaffold's velocity scaling); sign
+        rederived from whether the curve's entry-side neighbor is itself flipped
+        (copying the baked sign directly is wrong at one end of each loop, since the
+        two curves are mirror-image ends of the same track).
         """
         n = len(self.zones)
         for i, zone in enumerate(self.zones):
@@ -550,12 +316,8 @@ class ConveyorLineController:
             elif self.closed_loop:
                 next_center = self.zones[0].bbox_center
             else:
-                # Last zone of an open line: no downstream neighbor to derive
-                # a direction from - extrapolate from the previous zone's
-                # center through this one instead (every straight run in
-                # this scaffold is colinear) rather than wrapping back to
-                # zone 0, which would point the wrong way (backwards into
-                # the line) on anything but a real closed loop.
+                # Last zone of an open line: extrapolate from the previous zone's
+                # center through this one, rather than wrapping back to zone 0.
                 prev_center = self.zones[i - 1].bbox_center
                 next_center = (
                     2 * zone.bbox_center[0] - prev_center[0],
@@ -571,23 +333,9 @@ class ConveyorLineController:
             # negated below (unlike what gets authored as inputs:direction).
             zone.world_travel_direction = Gf.Vec3f(corrected)
 
-            # What actually gets authored as inputs:direction, by contrast,
-            # DOES need a per-body sign flip here - the opposite of
-            # racetrack.usd's own finding for its flipped rows (see this
-            # method's docstring above: there, the SAME raw vector, un-negated,
-            # was empirically correct for both flipped and unflipped rows).
-            # Confirmed empirically against 5_conv_env.usd via the DEBUG box
-            # position log in main(): with the un-negated vector authored,
-            # every box on ConveyorTrack (zone 0) drifted steadily in +X -
-            # AWAY from the pick zone at more negative X, off the belt's near
-            # (open) edge entirely - the opposite of the intended travel
-            # direction. Every track in 5_conv_env.usd happens to be
-            # uniformly ~180deg-rotated about Z (confirmed via
-            # _is_body_flipped on each), unlike racetrack.usd's per-row
-            # split (some flipped, some not) - negating for that uniform
-            # flip is what actually matches observed motion here. Why this
-            # differs from racetrack.usd's finding isn't fully root-caused;
-            # revisit both together if racetrack.usd is run again.
+            # The authored inputs:direction (unlike world_travel_direction above) DOES need
+            # a per-body sign flip here: every track is uniformly ~180deg-rotated about Z,
+            # and the un-negated vector drove boxes the wrong way off the belt's open edge.
             authored = -corrected if self._is_body_flipped(zone.belt_prim) else corrected
             baked = zone.direction_attr.Get()
             if Gf.Vec3f(baked) != authored:
@@ -604,31 +352,16 @@ class ConveyorLineController:
 
         n = len(self.zones)
         for i, zone in enumerate(self.zones):
-            # Closed loop: neighbors wrap around rather than terminating at
-            # open ends. Open line (5_conv_env.usd): zone 0 has no real
-            # upstream zone, so it's treated as always having more infeed
-            # available (per ConveyorZoneStateMachine.step's own
-            # upstream_occupied docstring) - moot in practice here since
-            # this scaffold's boxes start out pre-placed directly on zone 0
-            # rather than trickling in one at a time, so `occupied` alone
-            # already drives EMPTY->IDLE; this only matters once zone 0 has
-            # genuinely run dry of boxes. Symmetrically, the last zone hands
-            # off to an unmodeled outfeed (here, boxes simply run off the
-            # belt's end - into the truck, for loop 2), so its downstream is
-            # always reported clear. A held zone (e.g. the pick zone) never
-            # reports downstream_clear regardless, so it holds an arriving
-            # item indefinitely instead of auto-advancing it further -
-            # "starved" again only once whatever emptied it (the robot) lets
-            # it go.
+            # Open line: zone 0 has no real upstream, so it's always treated as having
+            # more infeed available; the last zone's downstream (open end/truck) is
+            # always clear, unless it's a held zone, which never reports clear.
             if i == 0 and not self.closed_loop:
                 upstream_occupied = True
             else:
                 upstream_occupied = self.occupied[(i - 1) % n]
 
-            # See set_hold_zone_ready_check: a hold zone only overflows (falls
-            # through to the ordinary-zone rule) while its robot is busy - and
-            # never if it's the line's last zone, which has nowhere to
-            # overflow TO (it would just run off the belt's open end).
+            # See set_hold_zone_ready_check: a hold zone overflows only while its robot
+            # is busy, and never if it's the line's last zone (nowhere to overflow to).
             is_last = i == n - 1 and not self.closed_loop
             robot_ready = i in self.hold_zone_indices and self._hold_zone_ready_checks.get(i, lambda: True)()
             holding = i in self.hold_zone_indices and (robot_ready or is_last)
@@ -639,20 +372,20 @@ class ConveyorLineController:
             else:
                 downstream_clear = not self.occupied[(i + 1) % n]
 
-            # Only a zone that's actually holding defines a stop position
-            # (see ConveyorZone.is_past_center) - every other zone (including
-            # a hold zone currently overflowing) defaults to True, reproducing
-            # the old stop-as-soon-as-occupied behavior.
+            # Any hold zone defines a stop position, whether or not it's currently
+            # holding for its own robot - it should still index a box up to that point
+            # (maximizing its own occupancy) even while overflowing because its robot is
+            # busy or its downstream neighbor is full; only non-hold zones default to
+            # True (stop-as-soon-as-occupied).
             at_stop_position = True
-            if holding and self._box_rigid_prims is not None and self.occupied[i]:
+            if i in self.hold_zone_indices and self._box_rigid_prims is not None and self.occupied[i]:
                 occupying_paths = zone.get_occupying_prim_paths()
-                box_rigid_prim = self._box_rigid_prims.get(occupying_paths[0]) if occupying_paths else None
+                leading_path = _leading_occupant_path(zone, occupying_paths, self._box_rigid_prims)
+                box_rigid_prim = self._box_rigid_prims.get(leading_path) if leading_path is not None else None
                 if box_rigid_prim is not None:
                     position, _ = box_rigid_prim.get_world_poses()
-                    # is_last has no downstream to overshoot into but open
-                    # ground - stop much earlier, leaving most of the belt
-                    # as deceleration runway instead of just the back half.
-                    stop_fraction = 0.15 if is_last else 0.5
+                    # is_last has open ground past it, not another zone - tuned separately.
+                    stop_fraction = 0.8 if is_last else 0.8
                     at_stop_position = zone.is_past_center(position.numpy()[0], stop_fraction=stop_fraction)
 
             observation, command = zone.state_machine.step(
@@ -689,12 +422,8 @@ class ConveyorLineController:
 
     @staticmethod
     def _machine_to_packml(machine) -> int:
-        """Coarse, documented-as-approximate PackML projection - see README.
-
-        Real PackML reporting on the physical line almost certainly carries
-        more nuance (Starting/Stopping/Held/Aborted transitions) than this
-        two-bucket mapping. Revisit once real behavior is available, same
-        caveat as the Machine state machine itself.
+        """Coarse, approximate PackML projection - see README for real PackML nuance
+        (Starting/Stopping/Held/Aborted) not modeled by this two-bucket mapping.
         """
         Machine = plc.ConveyorStateMachineCode
         running_states = {
@@ -706,21 +435,9 @@ class ConveyorLineController:
 
 
 def _deactivate_frame_meshes(stage: Usd.Stage, track_roots: tuple) -> None:
-    """Deactivate every track's `SM_ConveyorBelt_A06_02` frame/upright-posts mesh.
-
-    Applied at runtime (stage.SetActive(False)) rather than edited into
-    5_conv_env.usd, so the authored scene file is left untouched. This
-    removes the mesh from rendering AND from PhysX collision - unlike the
-    `Belt` mesh (see the large comment above `_apply_box_physics`), this frame
-    mesh currently IS tracked by cuMotion's RMPflow obstacle world, so
-    deactivating it means the arm no longer avoids the frame/upright posts,
-    only the belt-top zone bboxes it's separately given.
-
-    Unlike racetrack.usd (8 straight + curved tracks per loop, the curved
-    ones using a different frame asset, `SM_ConveyorBelt_A12`), every track in
-    5_conv_env.usd is the same straight `ConveyorBelt_A06` asset - so every
-    root is expected to match; a miss is a real error, not an
-    allowed-for curved-track gap.
+    """Deactivate every track's frame/upright-posts mesh at runtime (not edited into
+    the USD) - removes it from both rendering and cuMotion's obstacle tracking, so
+    the arm no longer avoids the frame/posts, only the belt-top zone bboxes.
     """
     deactivated = []
     for root in track_roots:
@@ -739,19 +456,8 @@ def _deactivate_frame_meshes(stage: Usd.Stage, track_roots: tuple) -> None:
 
 
 def _discover_box_prim_paths(stage: Usd.Stage) -> list:
-    """Find every pre-authored `CubeBox_*` prim - 5_conv_env.usd's pallet of
-    boxes stacked directly on ConveyorTrack's belt (confirmed via world-bbox
-    inspection: every one sits within ConveyorTrack's belt-top XY footprint,
-    in two stacked Z layers), unlike racetrack.usd, which ships with no
-    boxes and needed them referenced in at runtime (see git history).
-
-    Matches top-level box instances only (direct children of either the
-    stage root or `/World` - 5_conv_env.usd has both: some boxes parented
-    under `/World`, most left at the stage root, apparently from how the
-    scene was assembled in Create; harmless either way, this scaffold only
-    needs each box's own prim path), not their child meshes (also named with
-    this prefix's asset naming, e.g. `SM_CubeBox_A04_Body_01`, which doesn't
-    itself start with `BOX_PRIM_NAME_PREFIX`).
+    """Find every pre-authored CubeBox_* top-level prim (direct child of the stage
+    root or /World) - excludes child meshes that share the naming prefix.
     """
     paths = []
     for prim in stage.Traverse():
@@ -761,6 +467,50 @@ def _discover_box_prim_paths(stage: Usd.Stage) -> list:
         if parent.IsPseudoRoot() or parent.GetPath() == Sdf.Path("/World"):
             paths.append(str(prim.GetPath()))
     return sorted(paths)
+
+
+def _rank_pick_zone_hit_paths(
+    hit_paths: list[str],
+    box_rigid_prims: dict,
+    robot_xy: tuple[float, float],
+    max_reach_m: float = PICK_MAX_REACH_M,
+) -> str | None:
+    """Pick the closest reachable box to the robot (height as tie-breaker); drops
+    anything farther than max_reach_m rather than ranking it.
+    """
+    def _distance(path: str) -> float:
+        box_pos, _ = box_rigid_prims[path].get_world_poses()
+        return float(math.dist(box_pos.numpy()[0][:2], robot_xy))
+
+    reachable = [path for path in hit_paths if _distance(path) <= max_reach_m]
+    if not reachable:
+        return None
+
+    def _score(path: str) -> tuple[float, float, str]:
+        box_pos, _ = box_rigid_prims[path].get_world_poses()
+        pos = box_pos.numpy()[0]
+        return (_distance(path), -float(pos[2]), path)
+
+    return min(reachable, key=_score)
+
+
+def _leading_occupant_path(zone: "ConveyorZone", hit_paths: list[str], box_rigid_prims: dict) -> str | None:
+    """Pick whichever occupying box is furthest downstream - hit_paths isn't in
+    spatial order, so hit_paths[0] could be a trailing box instead.
+    """
+    if not hit_paths:
+        return None
+
+    travel = zone.world_travel_direction
+    if travel is None:
+        raise RuntimeError(f"{zone.node_path} has no world_travel_direction set")
+
+    def _downstream(path: str) -> float:
+        box_pos, _ = box_rigid_prims[path].get_world_poses()
+        pos = box_pos.numpy()[0]
+        return float(pos[0] * travel[0] + pos[1] * travel[1] + pos[2] * travel[2])
+
+    return max(hit_paths, key=_downstream)
 
 
 # Iteration cap for _resolve_box_overlaps's separation passes, and the extra
@@ -773,27 +523,10 @@ BOX_OVERLAP_CLEARANCE = 0.002  # meters
 
 
 def _resolve_box_overlaps(stage: Usd.Stage, box_paths: list) -> None:
-    """Nudge apart any box prims whose world AABBs actually overlap, before
-    physics ever runs.
-
-    5_conv_env.usd's pre-authored pallet places each box by hand; direct
-    inspection of the authored (pre-physics) positions found every pair's
-    clearance uncomfortably tight - some margins as small as ~2 cm - and
-    running the sim confirmed the consequence: boxes were observed drifting
-    tens of centimeters within the very first tick and continuing to spread
-    over the following seconds, well beyond gentle settling, evidently from
-    real (if small) initial interpenetration somewhere in the stack that
-    BOX_MAX_DEPENETRATION_VELOCITY's cap alone wasn't enough to keep
-    contained to the belt. Rather than guess at which pair(s) and hand-author
-    a fix, this resolves it generally: repeatedly scans every pair for AABB
-    overlap and, for any that overlap, pushes the second of the pair away
-    from the first along whichever axis has the SMALLEST overlap depth (a
-    standard minimum-translation-vector separation) - preserving the
-    designer's intended layout as closely as possible rather than
-    rearranging boxes wholesale. Runs to a fixed pass cap rather than
-    looping until clean, since resolving one pair can (rarely) reintroduce a
-    small overlap with a third box; a handful of passes is enough for ~19
-    boxes with only marginal initial overlaps.
+    """Nudge apart any box prims whose world AABBs actually overlap, before physics
+    ever runs - the pre-authored pallet has some pairs uncomfortably tight (~2cm),
+    which otherwise makes PhysX's depenetration fling boxes off the belt on tick one.
+    Pushes along the smallest-overlap axis (a standard MTV separation), to a fixed pass cap.
     """
 
     def _translate_op(prim: Usd.Prim) -> UsdGeom.XformOp:
@@ -833,21 +566,9 @@ def _resolve_box_overlaps(stage: Usd.Stage, box_paths: list) -> None:
 
 
 def _apply_box_physics(stage: Usd.Stage, box_paths: list) -> None:
-    """Add RigidBodyAPI + convex-hull CollisionAPI + a mass to every box prim.
-
-    5_conv_env.usd's CubeBox_* prims are pure visual payloads with no physics
-    schemas at all (confirmed via direct inspection) - unlike racetrack.usd's
-    referenced sm_box_multiDepth_brown_b08_01 boxes, which carry physics
-    baked into the referenced asset itself. Applied to each box's own root
-    Xform, the same pattern already used for every ConveyorTrack's `Belt`
-    (RigidBodyAPI + CollisionAPI on the Xform rather than a specific child
-    Mesh) - PhysX resolves the actual collision geometry from the Mesh prims
-    nested underneath either way. Convex-hull (not the default exact
-    triangle mesh) since these are dynamic bodies that will contact each
-    other and the moving belt - the same approximation
-    `_build_motion_planner` already prefers for cuMotion's obstacle Mesh
-    prims, for the same dynamic-contact-stability reason. Also caps each
-    box's `maxDepenetrationVelocity` - see BOX_MAX_DEPENETRATION_VELOCITY.
+    """Add RigidBodyAPI + convex-hull CollisionAPI + mass to every box prim (ships
+    with no physics schemas at all). Convex-hull since these are dynamic bodies in
+    contact with each other and the moving belt.
     """
     bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
     for path in box_paths:
@@ -868,17 +589,8 @@ def _apply_box_physics(stage: Usd.Stage, box_paths: list) -> None:
 
 
 def _apply_truck_collision(stage: Usd.Stage, truck_path: str) -> None:
-    """Add a static collider to the truck bed so falling boxes land in it
-    instead of clipping straight through.
-
-    `/World/SteelBoxTruck_A01_01` (like the boxes) is a pure visual payload -
-    confirmed via direct inspection, no physics schemas anywhere in its
-    subtree. Only its body mesh (`sm_steelboxtruck_a01_body_01`, the
-    bed/frame shape boxes actually land in/on) gets a collider - the wheel
-    meshes don't need one for this scaffold's purposes. Static (CollisionAPI
-    only, no RigidBodyAPI) since the truck itself never moves; the default
-    exact-triangle-mesh approximation is fine here (unlike the boxes, this
-    is a static collider, not one in dynamic-dynamic contact every tick).
+    """Add a static collider to the truck body mesh (a pure visual payload with no
+    physics) so falling boxes land in the bed instead of clipping through.
     """
     body_prim = stage.GetPrimAtPath(f"{truck_path}/sm_steelboxtruck_a01_body_01")
     if not body_prim.IsValid():
@@ -887,33 +599,47 @@ def _apply_truck_collision(stage: Usd.Stage, truck_path: str) -> None:
     print(f"[conveyor_indexer] added static collision to {body_prim.GetPath()}", flush=True)
 
 
+def _truck_body_world_bounds(stage: Usd.Stage, truck_path: str) -> tuple[Gf.Vec3d, Gf.Vec3d]:
+    """World-space AABB of the truck body mesh, computed once and reused every tick
+    to test whether a box has landed inside it (see _despawn_boxes_in_truck).
+    """
+    body_prim = stage.GetPrimAtPath(f"{truck_path}/sm_steelboxtruck_a01_body_01")
+    bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
+    aligned_range = bbox_cache.ComputeWorldBound(body_prim).ComputeAlignedRange()
+    return aligned_range.GetMin(), aligned_range.GetMax()
+
+
+# Parking spot for despawned boxes, far from any geometry so its AABB never
+# matches truck_bed_min/max again.
+DESPAWNED_BOX_PARK_POSITION = (100.0, 100.0, -100.0)
+
+
+def _despawn_boxes_in_truck(
+    box_rigid_prims: dict, truck_bed_min: Gf.Vec3d, truck_bed_max: Gf.Vec3d
+) -> None:
+    """Disable, hide, and park any box that's fallen inside the truck bed AABB.
+
+    Deleting the prim outright crashes the app: RigidPrim's shared PhysX tensor
+    view gets invalidated for every other tracked box too.
+    """
+    landed_paths = []
+    for box_path, rigid_prim in box_rigid_prims.items():
+        x, y, z = rigid_prim.get_world_poses()[0].numpy()[0]
+        if truck_bed_min[0] <= x <= truck_bed_max[0] and truck_bed_min[1] <= y <= truck_bed_max[1] and z <= truck_bed_max[2]:
+            landed_paths.append(box_path)
+    for box_path in landed_paths:
+        rigid_prim = box_rigid_prims[box_path]
+        rigid_prim.set_enabled_rigid_bodies([False])
+        rigid_prim.set_visibilities([False])
+        rigid_prim.set_world_poses(positions=[DESPAWNED_BOX_PARK_POSITION])
+        print(f"[conveyor_indexer] despawned {box_path} - landed in {TRUCK_PATH}", flush=True)
+
+
 def _localize_asset_references(stage_path: str, remote_root: str, local_root: str) -> None:
-    """Rewrite every reference/payload asset path under remote_root to
-    local_root, in the in-memory Sdf.Layer for stage_path, BEFORE it's ever
-    opened as a Usd.Stage.
-
-    Order matters: opening stage_path as a Usd.Stage (as main() does right
-    after calling this) composes every referenced/payloaded prim - e.g. each
-    ConveyorTrack's referenced Belt/frame geometry - which is exactly when
-    Kit would fetch these assets over the network. Sdf.Layer.FindOrOpen,
-    unlike Usd.Stage.Open, just parses the raw layer content (prim specs and
-    their un-resolved reference/payload list ops) without triggering that
-    composition/fetch - so every rewrite here happens first, and by the time
-    ctx.open_stage(stage_path) runs (finding this same, now-modified layer
-    already resident in Sdf's process-global layer registry, keyed by
-    resolved identifier, rather than re-reading the file from disk) it only
-    ever resolves local paths. Not saved back to disk, so 5_conv_env.usd
-    itself is never touched - same "runtime-only" convention as every other
-    mutation in this module (e.g. _deactivate_frame_meshes).
-
-    A no-op (falls back to fetching from remote_root, same as before this
-    function existed) if local_root doesn't exist - e.g. `download_assets.py`
-    (see README) hasn't been run yet on this machine.
-
-    Only handles `prepend` list-op items (`prependedItems`) - confirmed via
-    direct inspection that every reference/payload in 5_conv_env.usd is
-    authored that way (`prepend references = @url@` / `prepend payload =
-    @url@`), never `explicit`/`append`/`delete`.
+    """Rewrite reference/payload asset paths from remote_root to local_root in
+    stage_path's Sdf.Layer, before it's ever opened as a Usd.Stage (opening triggers
+    composition, which is when Kit would fetch the un-rewritten paths over the
+    network). Not saved to disk. No-op if local_root doesn't exist yet.
     """
     if not os.path.isdir(local_root):
         print(
@@ -962,58 +688,22 @@ def _localize_asset_references(stage_path: str, remote_root: str, local_root: st
     print(f"[conveyor_indexer] localized {rewritten} asset reference(s)/payload(s) to {local_root}", flush=True)
 
 
-# Each ConveyorTrack authors TWO separate collision meshes, confirmed by
-# traversing the stage: `SM_ConveyorBelt_A06_02` (the frame/upright
-# posts/bolts, an ordinary static Mesh) and `Belt` (just the moving surface,
-# under an Xform with PhysxSurfaceVelocityAPI). Only the latter fails
-# cuMotion's RMPflow obstacle world (`WorldBinding.initialize()`, called from
-# pick_and_place.py's `_build_rmpflow_controller`) - confirmed two different
-# ways (non-unity-scaled ancestors on some tracks; the belt mesh isn't one of
-# the supported obstacle shape types at all on others), both pre-existing
-# authoring quirks of the underlying ConveyorBelt_A06 asset, not something
-# this scaffold edits into the source scene.
-#
-# An early attempt here blanket-excluded ALL conveyor structure (both
-# meshes) to route around this - which meant the frame/upright posts were no
-# longer tracked either, and the arm was observed physically colliding with
-# them. `_build_rmpflow_controller`'s own retry loop already discovers and
-# excludes exactly the prims that fail (belt surfaces, occasional
-# non-unity-scaled ancestors) one at a time, so no exclusion list needs to be
-# passed from here at all - the frame/posts mesh, which never fails those
-# checks, stays tracked and avoided.
-#
-# A separate, even earlier attempt created synthetic capsule obstacles sized
-# from each zone's bbox as a substitute for the untrackable belt surface.
-# That was wrong in a more basic way than sizing, though: applying
-# UsdPhysics.CollisionAPI makes a prim a REAL PhysX collider, not just a
-# planning-time hint - the capsules physically collided with and shoved the
-# actual boxes on the belt (confirmed visually - grossly oversized red
-# capsules overlapping the real boxes/structure). There's no "obstacle hint,
-# not a real object" middle ground via this API.
+# Only the Belt mesh (not the frame/posts mesh) fails cuMotion's obstacle scan;
+# _build_rmpflow_controller's own retry loop already excludes exactly the failing
+# prims one at a time, so no exclusion list is passed from here. Synthetic capsule
+# obstacles were tried and rejected: CollisionAPI makes a real PhysX collider, not
+# just a planning hint, so they physically shoved the real boxes on the belt.
 
 
 def main() -> None:
-    # isaacsim.asset.gen.conveyor (provides the ConveyorNode OmniGraph node
-    # type every ConveyorBeltGraph uses) is not guaranteed to already be
-    # enabled by the app config SimulationApp resolves - confirmed directly:
-    # a run against this exact app config logged 16 (one per ConveyorNode)
-    # "Could not find node type interface for
-    # 'isaacsim.asset.gen.conveyor.IsaacConveyor'" warnings and no box ever
-    # reached the pick zone in 15+ seconds of sim time, i.e. no belt actually
-    # moved anything despite `inputs:enabled`/Velocity being authored
-    # correctly. Enabling it explicitly, before the stage (and its
-    # ConveyorBeltGraphs) is even opened, makes this independent of whatever
-    # extensions the resolved app happens to auto-load.
+    # isaacsim.asset.gen.conveyor isn't guaranteed enabled by the resolved app config;
+    # enable it explicitly before the stage (and its ConveyorBeltGraphs) is opened.
     omni.kit.app.get_app().get_extension_manager().set_extension_enabled_immediate(
         "isaacsim.asset.gen.conveyor", True
     )
 
-    # Open the target stage BEFORE constructing World: World() attaches to
-    # whatever stage is open at construction time, and open_stage() after the
-    # fact replaces the stage out from under it (World._scene ends up
-    # referencing a physics_sim_view tied to the old, now-gone stage -
-    # observed as "AttributeError: 'World' object has no attribute '_scene'"
-    # inside world.reset() when this ordering was wrong).
+    # Open the stage before constructing World: World() attaches at construction time,
+    # and opening after leaves it referencing a stale, now-gone stage.
     _localize_asset_references(STAGE_PATH, REMOTE_ASSET_ROOT, LOCAL_ASSET_ROOT)
     print(f"[conveyor_indexer] opening stage {STAGE_PATH}", flush=True)
     ctx = omni.usd.get_context()
@@ -1021,6 +711,7 @@ def main() -> None:
     stage = ctx.get_stage()
     _deactivate_frame_meshes(stage, CONVEYOR_TRACK_ROOTS)
     _apply_truck_collision(stage, TRUCK_PATH)
+    truck_bed_min, truck_bed_max = _truck_body_world_bounds(stage, TRUCK_PATH)
     box_paths = _discover_box_prim_paths(stage)
     if not box_paths:
         raise RuntimeError(
@@ -1034,13 +725,8 @@ def main() -> None:
     world = World(physics_dt=1.0 / 120.0, rendering_dt=1.0 / 60.0, stage_units_in_meters=1.0)
     print("[conveyor_indexer] World constructed, building logger + zones", flush=True)
 
-    # Pre-create the log directory rather than relying on
-    # ConveyorIndexingLogger's exists-at-call-time heuristic (mirrors
-    # data_collection_vol2.py's _resolve_parquet_path) to decide whether
-    # LOG_OUTPUT_DIR is a directory or a file stem - on a clean checkout
-    # (directory doesn't exist yet) that heuristic instead treats it as a
-    # file stem, e.g. writing conveyor_indexing/data.parquet directly rather
-    # than a timestamped file under conveyor_indexing/data/.
+    # Pre-create the log directory - on a clean checkout, ConveyorIndexingLogger's
+    # exists-at-call-time heuristic otherwise mistakes it for a file stem.
     pathlib.Path(LOG_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
     logger = ConveyorIndexingLogger(LOG_OUTPUT_DIR)
 
@@ -1064,10 +750,8 @@ def main() -> None:
         pedestal_height=PEDESTAL_HEIGHT,
     )
 
-    # Reach-balanced position for the second robot, derived from actual zone
-    # bbox geometry rather than hardcoded - loop 1 has 3 zones and loop 2 only
-    # 2, so ConveyorTrack_02/_10 aren't guaranteed to line up in X the way
-    # ConveyorTrack_01/_09 happen to (see ROBOT_POSITION's own comment).
+    # Reach-balanced position for the second robot, derived from actual zone geometry
+    # rather than hardcoded - ConveyorTrack_02/_10 aren't guaranteed to line up in X.
     pick_zone_2 = loop1.zones[PICK_ZONE_INDEX_2]
     place_zone_2 = loop2.zones[PLACE_ZONE_INDEX_2]
     robot_2_x = (pick_zone_2.bbox_center[0] + place_zone_2.bbox_center[0]) / 2.0
@@ -1092,31 +776,21 @@ def main() -> None:
         pedestal_height=PEDESTAL_HEIGHT,
     )
 
-    # Place target Z depends on box height, computed per-cycle inside
-    # MagicAttachPickPlace since any of the discovered boxes (see
-    # _discover_box_prim_paths) could be the one being carried; only the
-    # belt-top Z is fixed here.
+    # Place target Z depends on box height, computed per-cycle inside MagicAttachPickPlace;
+    # only the belt-top Z is fixed here.
     place_belt_prim = loop2.zones[PLACE_ZONE_INDEX].belt_prim
     bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
     place_belt_top_z = bbox_cache.ComputeWorldBound(place_belt_prim).ComputeAlignedRange().GetMax()[2]
     place_belt_top_z_2 = bbox_cache.ComputeWorldBound(place_zone_2.belt_prim).ComputeAlignedRange().GetMax()[2]
 
     box_rigid_prims = {path: RigidPrim(path) for path in box_paths}
-    # Only loop1 has hold zones (the pick zones) that need is_past_center()
-    # checks against a real box position - see ConveyorLineController.step().
+    # Only loop1 has hold zones needing is_past_center() checks against a real box position.
     loop1.set_box_rigid_prims(box_rigid_prims)
     print("[conveyor_indexer] robots ready, calling world.reset()", flush=True)
 
     world.reset()
-    # World.reset() (isaacsim.core.api, the classic API) has no knowledge of
-    # `isaacsim.core.experimental` prims like our plain `Articulation` robot -
-    # confirmed by reading world.py, it never calls reset_to_default_state()
-    # on them. So the dof_positions configured via set_default_state() in
-    # create_pedestal_and_robot() was silently never applied - the arm always
-    # started from its raw near-zero USD-authored pose regardless of what
-    # was configured, which was the real reason changing
-    # UR20_DEFAULT_JOINT_POSITIONS appeared to have no effect. Must be
-    # triggered explicitly.
+    # World.reset() has no knowledge of isaacsim.core.experimental prims like this
+    # robot and never calls reset_to_default_state() on them - must be triggered explicitly.
     robot.reset_to_default_state()
     robot2.reset_to_default_state()
     check_pos, _ = robot.get_world_poses()
@@ -1124,14 +798,10 @@ def main() -> None:
     print(f"[conveyor_indexer] DEBUG robot dof_positions AFTER reset_to_default_state(): {robot.get_dof_positions().numpy()}", flush=True)
     print("[conveyor_indexer] world.reset() done", flush=True)
 
-    # MagicAttachPickPlace builds the cuMotion RmpFlowController + collision
-    # world, which needs a valid PhysX tensor entity (robot.get_world_poses(),
-    # the SceneQuery obstacle scan) - must happen AFTER world.reset(), unlike
-    # the previous UR10/raw-IK version where construction was lightweight
-    # enough to happen before it.
-    # pre_place_joint_positions override: robot 2 sits on this robot's -X
-    # side, so its STAGE_FOR_PICK<->STAGE_FOR_PLACE swing must arc away from
-    # it instead - see UR20_PRE_PLACE_JOINT_POSITIONS_AWAY.
+    # MagicAttachPickPlace builds the cuMotion RmpFlowController, which needs a valid
+    # PhysX tensor entity - must happen after world.reset().
+    # pre_place_joint_positions override: robot 2 sits on this robot's -X side, so its
+    # pick<->place swing must arc away from it - see UR20_PRE_PLACE_JOINT_POSITIONS_AWAY.
     pick_place = MagicAttachPickPlace(
         robot=robot,
         robot_path=ROBOT_PATH,
@@ -1139,6 +809,7 @@ def main() -> None:
         place_belt_top_z=place_belt_top_z,
         box_rigid_prims=box_rigid_prims,
         physics_dt=world.get_physics_dt(),
+        get_pick_zone_occupant_paths=loop1.zones[PICK_ZONE_INDEX].get_occupying_prim_paths,
         extra_exclude_obstacle_paths=[GROUND_PLANE_COLLISION_PATH],
         pre_place_joint_positions=UR20_PRE_PLACE_JOINT_POSITIONS_AWAY,
     )
@@ -1149,6 +820,7 @@ def main() -> None:
         place_belt_top_z=place_belt_top_z_2,
         box_rigid_prims=box_rigid_prims,
         physics_dt=world.get_physics_dt(),
+        get_pick_zone_occupant_paths=loop1.zones[PICK_ZONE_INDEX_2].get_occupying_prim_paths,
         extra_exclude_obstacle_paths=[GROUND_PLANE_COLLISION_PATH],
     )
     loop1.set_hold_zone_ready_check(PICK_ZONE_INDEX, lambda: pick_place.phase_name == "WAITING")
@@ -1165,12 +837,9 @@ def main() -> None:
     pick_ready_2 = False
     pick_box_path_2 = None
 
-    # SIGTERM (container/systemd shutdown, `kill` without -INT) otherwise
-    # terminates the process immediately, bypassing the `finally` block below
-    # and the parquet writer never gets a clean close() - the in-progress
-    # file is left truncated/unreadable (missing footer). Route it through
-    # the normal loop-exit -> finally path instead, same as SIGINT/window
-    # close already do.
+    # SIGTERM otherwise kills the process immediately, skipping the finally block
+    # below and leaving the parquet writer's file truncated - route it through the
+    # normal loop-exit path instead, same as SIGINT.
     shutdown_requested = False
 
     def _handle_sigterm(signum, frame):
@@ -1186,12 +855,8 @@ def main() -> None:
             if world.is_playing():
                 world.step(render=True); sim_time += world.get_physics_dt()
 
-                # Pick-and-place motion runs every physics step for smooth
-                # RMPflow-driven convergence; conveyor indexing runs at the
-                # coarser control rate. `pick_ready`/`pick_box_path` only refresh at the
-                # control rate but are read every physics step - fine, since
-                # they only matter at the (infrequent) moment WAITING checks
-                # them.
+                # Pick-and-place runs every physics step for smooth convergence; conveyor
+                # indexing runs at the coarser control rate below.
                 pick_place.forward(pick_ready, pick_box_path)
                 pick_place_2.forward(pick_ready_2, pick_box_path_2)
 
@@ -1200,29 +865,31 @@ def main() -> None:
                     commands_msg = sim_action.SimConveyorCommands()
                     loop1.step(state_msg, commands_msg)
                     loop2.step(state_msg, commands_msg)
+                    _despawn_boxes_in_truck(box_rigid_prims, truck_bed_min, truck_bed_max)
                     logger.log_tick(
                         tick=tick,
                         sim_time_s=sim_time,
                         plc_state_conveyors=state_msg.SerializeToString(),
                         conveyor_commands=commands_msg.SerializeToString(),
                     )
-                    # Only "ready" once the pick zone's own state machine has
-                    # settled into holding (IDLE + occupied) - not mid-induction.
-                    # Identify WHICH box is actually there (any of the
-                    # discovered boxes can end up in this zone) rather than
-                    # assuming a fixed one.
+                    # Only "ready" once the pick zone has settled into holding (IDLE +
+                    # occupied); identify which box is actually there rather than assuming a fixed one.
                     pick_zone_hits = loop1.zones[PICK_ZONE_INDEX].get_occupying_prim_paths()
                     pick_ready = (
                         bool(pick_zone_hits)
                         and loop1.machine_states[PICK_ZONE_INDEX] == Machine.CONVEYOR_STATE_MACHINE_IDLE
                     )
-                    pick_box_path = pick_zone_hits[0] if pick_zone_hits else None
+                    pick_box_path = _rank_pick_zone_hit_paths(
+                        pick_zone_hits, box_rigid_prims, ROBOT_POSITION[:2]
+                    )
                     pick_zone_2_hits = loop1.zones[PICK_ZONE_INDEX_2].get_occupying_prim_paths()
                     pick_ready_2 = (
                         bool(pick_zone_2_hits)
                         and loop1.machine_states[PICK_ZONE_INDEX_2] == Machine.CONVEYOR_STATE_MACHINE_IDLE
                     )
-                    pick_box_path_2 = pick_zone_2_hits[0] if pick_zone_2_hits else None
+                    pick_box_path_2 = _rank_pick_zone_hit_paths(
+                        pick_zone_2_hits, box_rigid_prims, ROBOT_POSITION_2[:2]
+                    )
                     last_control_time = sim_time
                     tick += 1
                     if tick % 3 == 0 and pick_box_path is not None:
@@ -1242,7 +909,6 @@ def main() -> None:
                             f"pick_phase_2={pick_place_2.phase_name} pick_ready_2={pick_ready_2}",
                             flush=True,
                         )
-                        # TEMPORARY debug tracking - remove once direction issue is resolved.
                         zone0 = loop1.zones[0]
                         z0_dir = zone0.direction_attr.Get()
                         z0_enabled = zone0.node_prim.GetAttribute("inputs:enabled").Get()
