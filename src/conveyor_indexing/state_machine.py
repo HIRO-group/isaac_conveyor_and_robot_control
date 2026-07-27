@@ -26,15 +26,15 @@ whole point is to reflect real indexing decisions - see
 ``_handle_exception_states`` below, which is an explicit, never-called stub
 for that future work.
 
-This module depends on ``plc_connector_pb2``, generated from theia's real
-proto (see the top-level README in this directory for the generation step).
+This module depends on ``conveyor_indexing.protos``, itself generated from
+theia's real proto (see the top-level README for the generation step).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-import plc_connector_pb2 as plc
+from conveyor_indexing.protos import plc
 
 Machine = plc.ConveyorStateMachineCode
 
@@ -71,8 +71,8 @@ class ConveyorZoneStateMachine:
     """Happy-path state machine for a single conveyor zone.
 
     One instance per physical zone. ``ConveyorLineController`` (see
-    ``conveyor_indexer.py``) wires instances together in belt order and
-    supplies the upstream/downstream signals each needs.
+    ``conveyor_indexing.line_controller``) wires instances together in belt
+    order and supplies the upstream/downstream signals each needs.
     """
 
     def __init__(self, name: str, run_speed_pct: int = 100) -> None:
@@ -194,7 +194,7 @@ class ConveyorZoneStateMachine:
             # silently running the belt in an unknown state.
             raise NotImplementedError(
                 f"Zone '{self.name}' is in unimplemented Machine state {s!r}; "
-                "see conveyor_state_machine.py module docstring."
+                "see conveyor_indexing.state_machine's module docstring."
             )
 
         running = self._state in (
@@ -222,5 +222,5 @@ class ConveyorZoneStateMachine:
         """
         raise NotImplementedError(
             "Reject/fault state transitions are not implemented; see "
-            "conveyor_state_machine.py module docstring."
+            "conveyor_indexing.state_machine's module docstring."
         )

@@ -10,7 +10,7 @@ far end into a waiting truck.
 
 ## Environment
 
-`conveyor_indexer.py`'s `STAGE_PATH` currently points at
+`sim_cell.layout`'s `STAGE_PATH` currently points at
 `/home/ubuntu/5_conv_env.usd`, a smaller, purpose-built scene distinct from
 the two earlier ones this repo was originally developed against
 (`conveyor_setup.usd`, then `racetrack.usd` - see "Known gaps" below for
@@ -28,16 +28,16 @@ that history, most of which describes those older scenes, not this one):
   sit stacked (two layers) directly on `ConveyorTrack`'s belt - unlike
   `racetrack.usd`, which shipped with no boxes and needed them referenced in
   at runtime. They're pure visual payloads with no physics schemas at all;
-  `conveyor_indexer.py` discovers them (`_discover_box_prim_paths`) and adds
+  `sim_cell.stage_setup.boxes.discover_box_prim_paths` discovers them and adds
   `RigidBodyAPI` + convex-hull `CollisionAPI` + an estimated mass at runtime
-  (`_apply_box_physics`), the same "don't edit the source USD" convention
-  already used for `_deactivate_frame_meshes`.
+  (`apply_box_physics`), the same "don't edit the source USD" convention
+  already used for `sim_cell.stage_setup.tracks.deactivate_frame_meshes`.
 - **A `SteelBoxTruck_A01_01` sits at loop 2's far end**: its bed is ~0.83 m
   below belt-top height, right past `ConveyorTrack_10`'s end, so a box that
   rides loop 2 to completion runs off the belt and drops into the truck bed.
   Like the boxes, the truck ships as a pure visual payload -
-  `_apply_truck_collision` adds a static collider to its body mesh so boxes
-  actually land in it instead of clipping through.
+  `sim_cell.stage_setup.truck.apply_truck_collision` adds a static collider to
+  its body mesh so boxes actually land in it instead of clipping through.
 - **Pick/place geometry fits a UR20 without any runtime repositioning**:
   `ConveyorTrack_01` (loop 1 pick zone) and `ConveyorTrack_09` (loop 2 place
   zone) are both centered at local X=-3; a robot at the Y midpoint between
@@ -65,12 +65,12 @@ that history, most of which describes those older scenes, not this one):
   each zone's belt bounding box, computed once at startup (belts are static).
   Hits whose rigid body path falls under a known `/World/ConveyorTrack*`,
   robot, pedestal, or truck root are structure, not items, and are excluded.
-- **Indexing logic**: `conveyor_state_machine.py` implements a best-effort
-  "happy path" subset of the real `ConveyorStateMachineCode` enum from
-  `~/theia/proto/plc-connector/plc-connector.proto` - see that module's
+- **Indexing logic**: `conveyor_indexing.state_machine` implements a
+  best-effort "happy path" subset of the real `ConveyorStateMachineCode` enum
+  from `~/theia/proto/plc-connector/plc-connector.proto` - see that module's
   docstring for the exact state cycle and what's deliberately not
   implemented.
-- **Pick-and-place**: `pick_and_place.py`'s `MagicAttachPickPlace` runs a UR20
+- **Pick-and-place**: `pick_and_place.controller.MagicAttachPickPlace` runs a UR20
   (on a static pedestal at the reach-balanced midpoint between the two loops)
   through a phase state machine: approach, descend, "attach" (disable the
   box's rigid body and rigidly offset-follow the end effector - privileged
@@ -89,10 +89,11 @@ that history, most of which describes those older scenes, not this one):
   an arriving box is held stopped in front of the robot instead of
   auto-advancing, and only "starves" (lets the next box advance in) once the
   robot's magic-attach has moved the box away and occupancy clears. See
-  `PICK_ZONE_INDEX`/`hold_zone_indices` in `conveyor_indexer.py`. The hold
+  `sim_cell.layout.PICK_ZONE_INDEX` / the `hold_zone_indices` argument to
+  `conveyor_indexing.line_controller.ConveyorLineController`. The hold
   zone also keeps running past first-occupied until the box reaches the
-  zone's geometric center (`ConveyorZone.is_past_center`, gated via
-  `ConveyorZoneStateMachine.step`'s `at_stop_position` argument) rather than
+  zone's geometric center (`conveyor_indexing.zone.ConveyorZone.is_past_center`,
+  gated via `ConveyorZoneStateMachine.step`'s `at_stop_position` argument) rather than
   stopping wherever it first entered the occupancy sensor - the robot needs
   a fixed, reachable pick point every cycle, not one that drifts with
   however far the box carried into the zone before the belt cut out.
@@ -110,8 +111,8 @@ that history, most of which describes those older scenes, not this one):
     commands, collapsed into one repeated field for convenience. This does
     NOT modify theia's production proto files.
   - Both are written as binary columns per tick via
-    `conveyor_indexing_logger.py`, following the same background-batched
-    `ParquetWriter` pattern as `data_collection_vol2.py`.
+    `conveyor_indexing.parquet_logger.ConveyorIndexingLogger`, following the
+    same background-batched `ParquetWriter` pattern as `data_collection_vol2.py`.
 
 ## Setup
 
@@ -121,14 +122,14 @@ that history, most of which describes those older scenes, not this one):
    ```bash
    bash /home/ubuntu/conveyor_indexing/gen_proto.sh
    ```
-2. Run the indexer with Isaac Sim's bundled python, with the generated
-   bindings on `PYTHONPATH`:
+2. Run the indexer via `scripts/run.sh`, which sets `PYTHONPATH` to both
+   `src/` (this repo's `conveyor_indexing`/`pick_and_place`/`sim_cell`
+   packages) and `/tmp/proto_gen` (the bindings from step 1), then execs
+   Isaac Sim's bundled python on `scripts/run_conveyor_indexing.py`:
    ```bash
-   PYTHONPATH=/tmp/proto_gen /home/ubuntu/IsaacSim/python.sh /home/ubuntu/conveyor_indexing/conveyor_indexer.py
+   DISPLAY=:0 bash /home/ubuntu/conveyor_indexing/scripts/run.sh
    ```
-   (`conveyor_indexer.py` also inserts `/tmp/proto_gen` onto `sys.path`
-   itself, but setting `PYTHONPATH` is more robust if you move things
-   around.)
+   (see "Repo layout" below for what lives in `src/` vs `scripts/`.)
 
 Note: launching a second Isaac Sim instance while another one is already
 running interactively (e.g. the `cb_app.py` conveyor-belt Warp sample) will
@@ -140,7 +141,7 @@ Note: this machine has a real X server at `:0` (bridged via `x11vnc` +
 noVNC - the same one the interactive GUI screenshots in this project's
 history come from), but a plain non-interactive shell (e.g. an automated
 script/agent session, not a logged-in desktop session) doesn't have
-`DISPLAY` set. Running `conveyor_indexer.py` (which uses
+`DISPLAY` set. Running `scripts/run_conveyor_indexing.py` (which uses
 `SimulationApp({"headless": False})`) without `DISPLAY` set in such a shell
 makes the app exit cleanly after a few seconds with no error and no window
 - pass `DISPLAY=:0` explicitly. When running as a long-lived background
@@ -194,10 +195,10 @@ session; `setsid`/`nohup`/`disown` together fully detach it).
   occupied). Possible future extension, not built here since it wasn't part
   of the current scope.
 - **`Conveyor_Type` is hardcoded to `BUFFER`** for every zone in
-  `conveyor_indexer.py`. Set real per-zone types once you know which belts
-  are functioning as pick/place/buffer.
+  `conveyor_indexing.telemetry.append_conveyor_state`. Set real per-zone
+  types once you know which belts are functioning as pick/place/buffer.
 - **PackML mapping is a coarse two-bucket approximation**
-  (`_machine_to_packml` in `conveyor_indexer.py`): EXECUTE while
+  (`conveyor_indexing.telemetry.machine_to_packml`): EXECUTE while
   running, IDLE otherwise. Real PackML reporting almost certainly has more
   nuance (Starting/Stopping/Held/Aborted transitions).
 - ~~Items may not yet be populated on the belts~~ **Resolved**: there are two
@@ -231,8 +232,8 @@ session; `setsid`/`nohup`/`disown` together fully detach it).
   world position converging within `EE_POSITION_THRESHOLD` of the phase
   target (with a `MIN_STEPS_PER_PHASE` floor to avoid a one-tick fluke). The
   old fixed-duration values (`PHASE_TICKS`) are kept as a logged timeout
-  safety net, not the primary signal - see `_drive_to()` in
-  `pick_and_place.py`.
+  safety net, not the primary signal - see
+  `pick_and_place.trajectory.TrajectoryDriver.drive_to`.
 - ~~Reach margin is real but not generous~~ **Resolved by the UR10->UR20
   swap** (see below) - not yet re-validated empirically in the running sim
   at time of writing. The UR20 has a 1.75 m spec reach vs. the ~1.18 m needed
@@ -325,18 +326,19 @@ session; `setsid`/`nohup`/`disown` together fully detach it).
   every such call raises `TypeError`. This affects any robot driven through
   `RmpFlowController` on this machine, not just UR20 - even the
   officially-supported bundled UR10 example would hit it. Patched with a
-  small, reversible `np.reshape` compatibility shim local to
-  `pick_and_place.py`'s own process (never touches the shared Isaac Sim
-  installation) rather than editing the vendored file.
+  small, reversible `np.reshape` compatibility shim (`pick_and_place.compat`,
+  imported first thing in `pick_and_place/__init__.py`) local to this
+  process (never touches the shared Isaac Sim installation) rather than
+  editing the vendored file.
 
 - **RMPflow convergence in the real scene is NOT yet fully working - the
   arm reaches the right X/Y position above the box but stalls part-way
   through descending, and orientation doesn't settle to straight-down.**
   This is the main open item from this session. Confirmed facts, in the
-  order discovered (re-run `PYTHONPATH=/tmp/proto_gen
-  /home/ubuntu/IsaacSim/python.sh /home/ubuntu/conveyor_indexing/conveyor_indexer.py`
-  with `DISPLAY=:0` to keep debugging - see "Setup" for why `DISPLAY` needs
-  setting explicitly in a non-interactive shell on this machine):
+  order discovered (re-run `DISPLAY=:0 bash
+  /home/ubuntu/conveyor_indexing/scripts/run.sh` to keep debugging - see
+  "Setup" for why `DISPLAY` needs setting explicitly in a non-interactive
+  shell on this machine):
   - Fixed real bugs along the way, all still valid: `create_pedestal_and_robot()`'s
     `robot.set_default_state(...)` was never actually taking effect -
     `World.reset()` (`isaacsim.core.api`, the classic API) has no knowledge
@@ -346,17 +348,17 @@ session; `setsid`/`nohup`/`disown` together fully detach it).
     near-zero USD-authored pose every run regardless of
     `UR20_DEFAULT_JOINT_POSITIONS`. Fixed by calling
     `robot.reset_to_default_state()` explicitly right after `world.reset()`
-    in `conveyor_indexer.py`.
+    in `sim_cell.cell.build_cell`.
   - `UR20_DEFAULT_JOINT_POSITIONS` is a real, verified-reachable "ready"
     pose (tool0 pointing down, 0.5 m below the robot's own base) - derived
     by literally running `RmpFlowController` to convergence against that
     target in an empty, obstacle-free scene and reading back the converged
-    joint angles (see the constant's own comment in `pick_and_place.py`),
+    joint angles (see the constant's own comment in `pick_and_place.ur20`),
     not hand-picked. `robot_configs/ur20/robot.xrdf`'s
     `default_joint_positions` was updated to match (both must stay in
     sync - see `generate_ur20_xrdf.py`'s `DEFAULT_JOINT_POSITIONS_RAD`).
   - A **control test with RMPflow's obstacle tracking fully disabled**
-    (`_DEBUG_DISABLE_OBSTACLE_TRACKING`, left `False` in committed code)
+    (`sim_cell.settings.DISABLE_OBSTACLE_TRACKING`, left `False` by default)
     converged to a WORSE final position (0.95 m from target) than with
     obstacle tracking on (0.54 m) - this conclusively rules out
     collision-avoidance repulsion as the cause of the stall, despite it
@@ -372,7 +374,8 @@ session; `setsid`/`nohup`/`disown` together fully detach it).
   - Z (descent) and full orientation convergence remain unresolved:
     doubling the phase tick budgets (`PHASE_TICKS`) only bought ~6 cm of
     further Z progress, and the tool's actual world Z-axis direction
-    (see the `_local_z_axis_in_world()` diagnostic helper and the
+    (see the `pick_and_place.transforms.local_z_axis_in_world` diagnostic
+    helper and the
     `tool_z_axis_world=` value logged in `DESCEND_TO_PICK`'s debug print)
     swung noticeably between separate runs rather than settling toward the
     intended `(0, 0, -1)` - more consistent with a genuine stall (a joint
@@ -405,18 +408,73 @@ session; `setsid`/`nohup`/`disown` together fully detach it).
   behavior with a longer queue of boxes on loop 1, or a busy loop 2, hasn't
   been exercised.
 
+## Repo layout
+
+A `src/` layout with three packages, plus thin `scripts/` entry points -
+each package is independent, single-purpose, and split into small,
+atomic modules:
+
+- **`conveyor_indexing`** - zone occupancy sensing, the indexing state
+  machine, per-tick logging. Independent of any particular scene.
+- **`pick_and_place`** - UR20 + cuMotion magic-attach pick-and-place phase
+  state machine. Independent of any particular scene.
+- **`sim_cell`** - wiring for *this* cell: `5_conv_env.usd`'s prim layout
+  (`layout.py`), this run's tuning (`settings.py`), stage setup
+  (`stage_setup/`), and the main control loop (`runner.py`). Depends on both
+  of the above; they depend on neither it nor each other.
+
+None of the three packages are pip-installed (see `pyproject.toml`'s own
+comment) - `scripts/run.sh` puts `src/` directly on `PYTHONPATH` instead (see
+"Setup").
+
 ## Files
 
 | File | Purpose |
 |---|---|
-| `conveyor_indexer.py` | Standalone Isaac Sim entry point - occupancy sensing, zone wiring (both loops), pick/place wiring, per-tick logging. |
-| `conveyor_state_machine.py` | `ConveyorZoneStateMachine` - the happy-path indexing logic. |
-| `conveyor_indexing_logger.py` | Background-batched parquet writer, schema-compatible with theia's real data collection. |
-| `pick_and_place.py` | `MagicAttachPickPlace` + UR20/pedestal setup - the cuMotion-RMPflow-driven pick-and-place phase state machine. |
-| `robot_configs/generate_ur20_urdf.py` | Exports `robot_configs/ur20/robot.urdf` from the bundled `ur20.usd` asset (+ appends a `tool0` frame). |
-| `robot_configs/generate_ur20_spheres_morphit.py` | Generates per-link collision spheres via MorphIt, writes `robot_configs/ur20/morphit_spheres/*.json`. |
-| `robot_configs/generate_ur20_xrdf.py` | Builds `robot_configs/ur20/robot.xrdf` (+ Lula `robot_description.yaml`) from the MorphIt spheres. |
-| `robot_configs/smoke_test_ur20_rmpflow.py` | Standalone RmpFlowController convergence test against the generated UR20 config, in isolation from the full scaffold. |
-| `robot_configs/ur20/` | Generated UR20 cuMotion config: `robot.urdf`, `robot.xrdf`, hand-authored `rmp_flow.yaml`, `meshes/`, `morphit_spheres/`. |
+| `scripts/run.sh` | Launches the sim: sets `PYTHONPATH` (`src/` + the generated proto bindings), execs Isaac Sim's `python.sh` on `run_conveyor_indexing.py`. |
+| `scripts/run_conveyor_indexing.py` | Entry point - constructs `SimulationApp`, then hands off to `sim_cell.runner.run`. |
+| `scripts/download_assets.py` | Mirrors `5_conv_env.usd`'s referenced S3 assets locally (see `sim_cell.asset_paths`). |
+| `src/conveyor_indexing/state_machine.py` | `ConveyorZoneStateMachine` - the happy-path indexing logic. |
+| `src/conveyor_indexing/zone.py` | `ConveyorZone` - one zone's USD ConveyorNode + belt bbox + occupancy. |
+| `src/conveyor_indexing/line_controller.py` | `ConveyorLineController` - wires a line's zones together, neighbor occupancy, hold-zone overflow. |
+| `src/conveyor_indexing/parquet_logger.py` | `ConveyorIndexingLogger` - background-batched parquet writer, schema-compatible with theia's real data collection. |
+| `src/conveyor_indexing/{belt_geometry,occupancy,directions,telemetry,protos}.py` | Supporting atomic modules - belt-top bbox math, PhysX overlap queries, direction-correction geometry, proto message building, and the single point the generated proto bindings are imported from. |
+| `src/pick_and_place/controller.py` | `MagicAttachPickPlace` - the pick-and-place phase state machine. |
+| `src/pick_and_place/motion_planner.py` | cuMotion `GraphBasedMotionPlanner` construction, incl. the obstacle-scan retry loop. |
+| `src/pick_and_place/trajectory.py` | `TrajectoryDriver` - plan-once-per-phase, open-loop trajectory playback. |
+| `src/pick_and_place/{compat,ur20,transforms,phases,box_queries,robot_setup,obstacle_guard,ik,attachment,selection}.py` | Supporting atomic modules - the NumPy shim, UR20 constants, quaternion math, phase/tick-budget constants, box pose queries, pedestal/robot spawning, the obstacle-rotation-reset workaround, IK, magic-attach FixedJoint create/delete, and pick-candidate ranking. |
+| `src/sim_cell/layout.py` | Everything specific to `5_conv_env.usd`'s prim paths (`STAGE_PATH`, zone paths, robot/truck paths). |
+| `src/sim_cell/settings.py` | Run-time tuning (control/physics rate, per-line speed, robot placement). |
+| `src/sim_cell/stage_setup/` | Opens the stage and prepares it: asset localization, frame-mesh deactivation, box/truck physics. |
+| `src/sim_cell/cell.py` | `build_cell()` - builds the World, both lines, both robots, both pick-and-place controllers. |
+| `src/sim_cell/runner.py` | `run()` - the main control loop. |
+| `src/sim_cell/log_setup.py` | Attaches stdout logging handlers to each package's root logger (see "Logging" below). |
+| `robot_configs/generate_ur20_spheres_lula.py` | Generates per-link collision spheres via Lula's built-in generator. |
+| `robot_configs/generate_ur20_xrdf.py` | Builds `robot_configs/ur20/robot.xrdf` (+ Lula `robot_description.yaml`) from the collision spheres. |
+| `robot_configs/visualize_ur20_collision_spheres.py` | Interactive viewer for the generated collision spheres. |
+| `robot_configs/ur20/` | Generated UR20 cuMotion config: `robot.xrdf`, `robot_description.yaml`, `lula_spheres/`. |
 | `proto/sim_conveyor_action.proto` | Sim-only action schema (see above). |
 | `gen_proto.sh` | Generates Python bindings for both theia's real state schema and the sim action schema. |
+| `pyproject.toml` | Tooling config only (mypy/ruff) - see "Repo layout" above for why there's no install step. |
+
+## Logging
+
+Every module logs via the standard `logging` module (`logging.getLogger(__name__)`)
+rather than `print(..., flush=True)`. `sim_cell.log_setup.configure_logging()`
+(called once, at the top of `scripts/run_conveyor_indexing.py`) attaches a
+stdout handler to each of the three package-root loggers
+(`conveyor_indexing`, `pick_and_place`, `sim_cell`) at `INFO` - deliberately
+not `logging.basicConfig`/root propagation, since Kit reconfigures the root
+logger into carb's own log system. Log lines are now prefixed with the
+module path (e.g. `[sim_cell.runner]`) rather than the old
+`[conveyor_indexer]`/`[pick_and_place]` prefixes.
+
+To get the old `DEBUG_LOG_OCCUPANCY_HITS`/`DEBUG_LOG_HOLD_ZONE_STATE`
+per-tick diagnostics (and the tick-counter dumps that used to print
+unconditionally every 3rd control tick), set the
+`CONVEYOR_INDEXING_DEBUG_LOGGERS` env var to a comma-separated list of
+logger names before launching, e.g.:
+```bash
+CONVEYOR_INDEXING_DEBUG_LOGGERS=conveyor_indexing.occupancy,conveyor_indexing.line_controller,sim_cell.debug \
+  DISPLAY=:0 bash scripts/run.sh
+```
