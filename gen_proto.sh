@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Generate Python protobuf bindings needed by conveyor_indexer.py:
+# Generate Python protobuf bindings needed by scripts/run_conveyor_indexing.py
+# (via conveyor_indexing.protos):
 #   - theia's real plc-connector.proto + common/types.proto (schema for state)
 #   - this directory's sim_conveyor_action.proto (schema for actions)
 #
@@ -38,5 +39,5 @@ $PROTOC \
   "$SIM_PROTO_DIR/sim_conveyor_action.proto"
 
 echo "Proto generated at $PROTO_OUT"
-echo "Run conveyor_indexer.py with that on PYTHONPATH, e.g.:"
-echo "  PYTHONPATH=$PROTO_OUT ./python.sh /home/ubuntu/conveyor_indexing/conveyor_indexer.py"
+echo "scripts/run.sh already puts $PROTO_OUT on PYTHONPATH - just run:"
+echo "  DISPLAY=:0 bash /home/ubuntu/conveyor_indexing/scripts/run.sh"
