@@ -11,7 +11,7 @@ import logging
 import os
 import sys
 
-_PACKAGE_LOGGERS = ("conveyor_indexing", "pick_and_place", "sim_cell")
+_PACKAGE_LOGGERS = ("cameras", "conveyor_indexing", "pick_and_place", "sim_cell")
 
 # Comma-separated logger names to raise to DEBUG, e.g.
 #   CONVEYOR_INDEXING_DEBUG_LOGGERS=conveyor_indexing.occupancy,sim_cell.debug

@@ -113,23 +113,119 @@ that history, most of which describes those older scenes, not this one):
   - Both are written as binary columns per tick via
     `conveyor_indexing.parquet_logger.ConveyorIndexingLogger`, following the
     same background-batched `ParquetWriter` pattern as `data_collection_vol2.py`.
+- **Cameras**: 6 runtime-created cameras - `pick_cam`/`place_cam`/`hand_cam`
+  for each of the two robot stations, matching theia's production camera
+  seed (`~/theia/infra/etcd/bootstrap/seed/defaults.json`'s `camera.*`, two
+  robot cells x three roles). Color only for now (RGB8, 640x480@30 by
+  default - see `sim_cell.settings.CAMERA_*`); depth fields exist in the
+  wire contract but stay zeroed. Overhead cams (`pick_cam`/`place_cam`) are
+  positioned above each zone's belt from real belt-bbox geometry (same
+  `conveyor_indexing.belt_geometry.compute_belt_bounds` helper
+  `robot_placement.py` already uses); hand cams are parented under each
+  UR20's wrist flange (`sim_cell.layout.HAND_CAM_PARENT`) so they ride the
+  arm's kinematics. See `src/cameras/` for the package and "Camera wire
+  contract" / "Camera tuning" below for the publishing contract and the
+  visualize-adjust-save workflow for getting each camera's pose right.
+  - **GPU-first capture**: this machine is CPU-throttled, so the whole
+    per-frame path after rendering - reading the Replicator "rgb" annotator,
+    converting RGBA to RGB - runs on the GPU (`cameras.rig.CameraRig`, via a
+    zero-copy Warp array -> `warp.torch.to_torch` -> GPU-side slice), with
+    exactly one host copy per published frame (the final RGB buffer, not the
+    RGBA source). Falls back to CPU capture (logged once) if CUDA/Torch
+    interop isn't available in a given Isaac Sim install.
+
+### Camera wire contract
+
+Cameras publish over Zenoh on the same key namespace and message shapes
+theia's real camera service and data collection use
+(`~/theia/proto/camera/camera.proto`, `~/theia/data_collection/src/data_collection_vol2.py`)
+so recorded sim data and theia's collectors are directly compatible - but
+**conveyor_indexing does not depend on theia** (this repo is public research
+code; theia is private). `proto/sim_camera.proto` is a local mirror,
+wire-compatible by field number/type with theia's schema (protobuf's wire
+format only cares about those, not package names) - the same pattern
+`proto/sim_conveyor_action.proto` already uses for the action schema. See
+that file's header comment for exactly what's mirrored and what's
+deliberately omitted (notify/health, future work).
+
+- `theia/camera/list`: latched publisher + queryable serving a `CameraList`
+  protobuf (one `CameraInfo` per camera) - `cameras.zenoh_publisher.CameraZenohPublisher`
+  does both a `put()` and a live `declare_queryable()` on this key, since
+  consumers query it differently (a one-shot `session.get()` vs. a
+  timeout-bounded query).
+- `theia/camera/{serial}/color`: raw RGB8 bytes (no proto wrapper,
+  `len == height*width*3`), one per camera, with a `FrameMetadata` protobuf
+  (timestamps + monotonic frame number + a UUIDv7) as the Zenoh
+  *attachment*, not the payload. `depth` topics are advertised in
+  `CameraInfo` but nothing publishes to them yet.
+- Session setup (`cameras.zenoh_publisher._open_session`) mirrors theia's own
+  collector: `ZENOH_ROUTER` env var set -> connect to that endpoint; unset ->
+  open in peer-to-peer mode, so the sim runs standalone with no router
+  needed (see "Setup" below for verifying this without theia at all).
 
 ## Setup
 
-1. Generate the protobuf Python bindings (`protoc` and the `protobuf` Python
-   package must be available - neither was present on this machine as of
-   this writing; install `protoc` first, e.g. via your package manager):
+1. Run `scripts/setup.sh`, which does two things:
+   - Generates the protobuf Python bindings (`protoc` and the `protobuf`
+     Python package must be available - neither was present on this
+     machine as of this writing; install `protoc` first, e.g. via your
+     package manager) via `gen_proto.sh`.
+   - Installs `eclipse-zenoh==1.7.1` into **Isaac Sim's bundled python**
+     (`/home/ubuntu/IsaacSim/python.sh`, not the system python) - required
+     for camera publishing (see "Design" above and `src/cameras/zenoh_publisher.py`);
+     the sim exits with an actionable error if it's missing. `scripts/run.sh`
+     also pre-flight checks for it before paying a full Isaac Sim startup.
    ```bash
-   bash /home/ubuntu/conveyor_indexing/gen_proto.sh
+   bash /home/ubuntu/conveyor_indexing/scripts/setup.sh
    ```
 2. Run the indexer via `scripts/run.sh`, which sets `PYTHONPATH` to both
-   `src/` (this repo's `conveyor_indexing`/`pick_and_place`/`sim_cell`
+   `src/` (this repo's `conveyor_indexing`/`pick_and_place`/`sim_cell`/`cameras`
    packages) and `/tmp/proto_gen` (the bindings from step 1), then execs
    Isaac Sim's bundled python on `scripts/run_conveyor_indexing.py`:
    ```bash
    DISPLAY=:0 bash /home/ubuntu/conveyor_indexing/scripts/run.sh
    ```
    (see "Repo layout" below for what lives in `src/` vs `scripts/`.)
+
+   By default this opens a Zenoh session in **peer-to-peer mode** (no router
+   needed) - set `ZENOH_ROUTER` (e.g. `tcp/127.0.0.1:7447`, theia's own
+   default) to instead connect to a running Zenoh router, such as one from a
+   real theia deployment:
+   ```bash
+   ZENOH_ROUTER=tcp/127.0.0.1:7447 DISPLAY=:0 bash /home/ubuntu/conveyor_indexing/scripts/run.sh
+   ```
+3. Verify the camera contract without theia at all: with the sim running,
+   in another shell:
+   ```bash
+   PYTHONPATH=/tmp/proto_gen python3 /home/ubuntu/conveyor_indexing/scripts/camera_probe.py
+   ```
+   This fetches `theia/camera/list`, subscribes to one camera's color topic,
+   validates the frame size and `FrameMetadata` attachment, and writes the
+   frame out as a `.ppm` image. See `scripts/camera_probe.py`'s docstring for
+   options (`--serial`, `--out`).
+
+### Camera tuning
+
+Overhead camera positions are derived from belt geometry and hand cams from
+a fixed flange offset (see "Design" above) - close, but likely needing a
+manual nudge to actually frame each zone/tool correctly. To tune and save
+camera transforms:
+
+```bash
+CONVEYOR_INDEXING_CAMERA_TUNING=1 DISPLAY=:0 bash /home/ubuntu/conveyor_indexing/scripts/run.sh
+```
+
+This opens one small viewport per camera, each locked to that camera's live
+feed (`sim_cell.camera_tuning`). Drag the camera prims in the main
+viewport/stage tree with the ordinary USD gizmo while watching the locked
+viewports update, then press **F10** to save every camera's current
+transform to `environments/camera_poses.json` (local/flange-relative for
+hand cams, so the saved offset stays correct as the arm moves; world-frame
+for overhead cams). Commit that file - subsequent normal runs (env var
+unset) load it automatically and take it over the derived defaults (see
+`sim_cell.camera_layout.build_camera_specs`). Saving is an explicit,
+one-shot action; nothing is auto-persisted, so accidental nudges are safe to
+ignore by just not pressing F10.
 
 Note: launching a second Isaac Sim instance while another one is already
 running interactively (e.g. the `cb_app.py` conveyor-belt Warp sample) will
@@ -407,10 +503,27 @@ session; `setsid`/`nohup`/`disown` together fully detach it).
 - **Single-box capacity per zone/queue depth untested beyond two boxes** -
   behavior with a longer queue of boxes on loop 1, or a busy loop 2, hasn't
   been exercised.
+- **Cameras have not yet been run against a live Isaac Sim instance** - the
+  package was written and read-verified against the exact APIs present in
+  this machine's Isaac Sim install (`omni.replicator.core-1.13.27`,
+  `omni.warp.core`'s `warp.torch.to_torch`), but not yet exercised end-to-end
+  in the running sim. Things to confirm on first real run (see "Camera
+  tuning" above and `scripts/camera_probe.py`):
+  - Hand-cam orientation (`sim_cell.camera_layout._hand_cam_spec`'s 180 deg
+    X rotation) - verify the tuning viewport shows the tool, not sky, and
+    adjust/save if not.
+  - Overhead cam framing (`settings.CAMERA_HEIGHT_ABOVE_BELT_M`/focal
+    length) actually covers each belt zone with reasonable margin.
+  - Actual render-time cost of 6 extra 640x480 render products on this
+    single-GPU machine; `settings.CAMERA_FPS` then resolution are the knobs
+    if it's too heavy.
+  - That the GPU capture path (`cameras.rig.CameraRig._attach_annotator`)
+    actually takes the `cuda` branch rather than silently falling back to
+    CPU - check the "camera rig ready" log line's `gpu_capture=` value.
 
 ## Repo layout
 
-A `src/` layout with three packages, plus thin `scripts/` entry points -
+A `src/` layout with four packages, plus thin `scripts/` entry points -
 each package is independent, single-purpose, and split into small,
 atomic modules:
 
@@ -418,10 +531,14 @@ atomic modules:
   machine, per-tick logging. Independent of any particular scene.
 - **`pick_and_place`** - UR20 + cuMotion magic-attach pick-and-place phase
   state machine. Independent of any particular scene.
+- **`cameras`** - camera rig creation/capture and theia-wire-contract Zenoh
+  publishing (see "Design" above). Independent of any particular scene; like
+  the other two, never imports `sim_cell`.
 - **`sim_cell`** - wiring for *this* cell: `5_conv_env.usd`'s prim layout
   (`layout.py`), this run's tuning (`settings.py`), stage setup
-  (`stage_setup/`), and the main control loop (`runner.py`). Depends on both
-  of the above; they depend on neither it nor each other.
+  (`stage_setup/`), camera placement/tuning (`camera_layout.py`/
+  `camera_tuning.py`), and the main control loop (`runner.py`). Depends on
+  all three of the above; they depend on neither it nor each other.
 
 None of the three packages are pip-installed (see `pyproject.toml`'s own
 comment) - `scripts/run.sh` puts `src/` directly on `PYTHONPATH` instead (see
@@ -431,9 +548,11 @@ comment) - `scripts/run.sh` puts `src/` directly on `PYTHONPATH` instead (see
 
 | File | Purpose |
 |---|---|
-| `scripts/run.sh` | Launches the sim: sets `PYTHONPATH` (`src/` + the generated proto bindings), execs Isaac Sim's `python.sh` on `run_conveyor_indexing.py`. |
+| `scripts/setup.sh` | One-time setup: generates proto bindings, installs `eclipse-zenoh` into Isaac Sim's bundled python. |
+| `scripts/run.sh` | Launches the sim: pre-flight-checks for `zenoh`, sets `PYTHONPATH` (`src/` + the generated proto bindings), execs Isaac Sim's `python.sh` on `run_conveyor_indexing.py`. |
 | `scripts/run_conveyor_indexing.py` | Entry point - constructs `SimulationApp`, then hands off to `sim_cell.runner.run`. |
 | `scripts/download_assets.py` | Mirrors `5_conv_env.usd`'s referenced S3 assets locally (see `sim_cell.asset_paths`). |
+| `scripts/camera_probe.py` | Standalone (no theia, no Isaac Sim) Zenoh client that verifies the camera contract end-to-end and dumps a frame to `.ppm`. |
 | `src/conveyor_indexing/state_machine.py` | `ConveyorZoneStateMachine` - the happy-path indexing logic. |
 | `src/conveyor_indexing/zone.py` | `ConveyorZone` - one zone's USD ConveyorNode + belt bbox + occupancy. |
 | `src/conveyor_indexing/line_controller.py` | `ConveyorLineController` - wires a line's zones together, neighbor occupancy, hold-zone overflow. |
@@ -443,10 +562,15 @@ comment) - `scripts/run.sh` puts `src/` directly on `PYTHONPATH` instead (see
 | `src/pick_and_place/motion_planner.py` | cuMotion `GraphBasedMotionPlanner` construction, incl. the obstacle-scan retry loop. |
 | `src/pick_and_place/trajectory.py` | `TrajectoryDriver` - plan-once-per-phase, open-loop trajectory playback. |
 | `src/pick_and_place/{compat,ur20,transforms,phases,box_queries,robot_setup,obstacle_guard,ik,attachment,selection}.py` | Supporting atomic modules - the NumPy shim, UR20 constants, quaternion math, phase/tick-budget constants, box pose queries, pedestal/robot spawning, the obstacle-rotation-reset workaround, IK, magic-attach FixedJoint create/delete, and pick-candidate ranking. |
-| `src/sim_cell/layout.py` | Everything specific to `5_conv_env.usd`'s prim paths (`STAGE_PATH`, zone paths, robot/truck paths). |
-| `src/sim_cell/settings.py` | Run-time tuning (control/physics rate, per-line speed, robot placement). |
+| `src/cameras/rig.py` | `CameraRig` - creates camera prims + render products + RGB annotators, GPU-first frame capture. |
+| `src/cameras/zenoh_publisher.py` | `CameraZenohPublisher` - serves the latched camera list, publishes per-camera color frames with a `FrameMetadata` attachment. |
+| `src/cameras/{specs,frame_meta,pose_io,protos}.py` | Supporting atomic modules - the camera spec dataclass + theia-contract proto builders, per-frame timestamp/UUIDv7/frame-counter helpers, tuned-pose JSON load/save, and the single point the generated camera proto bindings are imported from. |
+| `src/sim_cell/layout.py` | Everything specific to `5_conv_env.usd`'s prim paths (`STAGE_PATH`, zone paths, robot/truck paths, camera root/hand-cam-parent paths). |
+| `src/sim_cell/settings.py` | Run-time tuning (control/physics rate, per-line speed, robot placement, camera resolution/fps/placement). |
 | `src/sim_cell/stage_setup/` | Opens the stage and prepares it: asset localization, frame-mesh deactivation, box/truck physics. |
-| `src/sim_cell/cell.py` | `build_cell()` - builds the World, both lines, both robots, both pick-and-place controllers. |
+| `src/sim_cell/camera_layout.py` | `build_camera_specs()` - derives all 6 camera placements from zone/robot geometry, applies any saved tuning overrides. |
+| `src/sim_cell/camera_tuning.py` | `maybe_enable_camera_tuning()` - the opt-in visualize/adjust/save workflow (see "Camera tuning" above). |
+| `src/sim_cell/cell.py` | `build_cell()` - builds the World, both lines, both robots, both pick-and-place controllers, the camera rig + publisher. |
 | `src/sim_cell/runner.py` | `run()` - the main control loop. |
 | `src/sim_cell/log_setup.py` | Attaches stdout logging handlers to each package's root logger (see "Logging" below). |
 | `robot_configs/generate_ur20_spheres_lula.py` | Generates per-link collision spheres via Lula's built-in generator. |
@@ -454,7 +578,9 @@ comment) - `scripts/run.sh` puts `src/` directly on `PYTHONPATH` instead (see
 | `robot_configs/visualize_ur20_collision_spheres.py` | Interactive viewer for the generated collision spheres. |
 | `robot_configs/ur20/` | Generated UR20 cuMotion config: `robot.xrdf`, `robot_description.yaml`, `lula_spheres/`. |
 | `proto/sim_conveyor_action.proto` | Sim-only action schema (see above). |
-| `gen_proto.sh` | Generates Python bindings for both theia's real state schema and the sim action schema. |
+| `proto/sim_camera.proto` | Sim-only camera schema, wire-compatible with theia's real camera contract (see "Camera wire contract" above). |
+| `environments/camera_poses.json` | Tuned camera transforms saved by the camera-tuning workflow (see "Camera tuning" above); absent on a fresh checkout until first tuned. |
+| `gen_proto.sh` | Generates Python bindings for theia's real state schema, the sim action schema, and the sim camera schema. |
 | `pyproject.toml` | Tooling config only (mypy/ruff) - see "Repo layout" above for why there's no install step. |
 
 ## Logging
@@ -462,8 +588,8 @@ comment) - `scripts/run.sh` puts `src/` directly on `PYTHONPATH` instead (see
 Every module logs via the standard `logging` module (`logging.getLogger(__name__)`)
 rather than `print(..., flush=True)`. `sim_cell.log_setup.configure_logging()`
 (called once, at the top of `scripts/run_conveyor_indexing.py`) attaches a
-stdout handler to each of the three package-root loggers
-(`conveyor_indexing`, `pick_and_place`, `sim_cell`) at `INFO` - deliberately
+stdout handler to each of the four package-root loggers
+(`cameras`, `conveyor_indexing`, `pick_and_place`, `sim_cell`) at `INFO` - deliberately
 not `logging.basicConfig`/root propagation, since Kit reconfigures the root
 logger into carb's own log system. Log lines are now prefixed with the
 module path (e.g. `[sim_cell.runner]`) rather than the old

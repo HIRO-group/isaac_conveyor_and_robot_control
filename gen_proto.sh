@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Generate Python protobuf bindings needed by scripts/run_conveyor_indexing.py
-# (via conveyor_indexing.protos):
+# (via conveyor_indexing.protos / cameras.protos):
 #   - theia's real plc-connector.proto + common/types.proto (schema for state)
 #   - this directory's sim_conveyor_action.proto (schema for actions)
+#   - this directory's sim_camera.proto (schema for cameras - wire-compatible
+#     with theia's real camera.proto, but generated from this repo's own copy;
+#     see proto/sim_camera.proto's header comment for why)
 #
 # Usage:
 #   bash /home/ubuntu/conveyor_indexing/gen_proto.sh
@@ -37,6 +40,11 @@ $PROTOC \
   -I "$SIM_PROTO_DIR" \
   --python_out="$PROTO_OUT" \
   "$SIM_PROTO_DIR/sim_conveyor_action.proto"
+
+$PROTOC \
+  -I "$SIM_PROTO_DIR" \
+  --python_out="$PROTO_OUT" \
+  "$SIM_PROTO_DIR/sim_camera.proto"
 
 echo "Proto generated at $PROTO_OUT"
 echo "scripts/run.sh already puts $PROTO_OUT on PYTHONPATH - just run:"

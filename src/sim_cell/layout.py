@@ -38,6 +38,21 @@ ROBOT_PATH_2 = "/World/PickPlaceRobot_02"
 PEDESTAL_PATH_2 = "/World/PickPlacePedestal_02"
 TRUCK_PATH = "/World/SteelBoxTruck_A01_01"
 
+# Grouping scope for the overhead (pick_cam/place_cam) camera prims - world
+# frame, since it has no authored transform of its own (see cameras.rig).
+CAMERA_ROOT_PATH = "/World/Cameras"
+
+# UR20 has no `tool0` prim in the bundled asset - only this Xform under
+# wrist_3_link (see robot_configs/generate_ur20_urdf.py, which derives a
+# tool0 frame from this prim's actual authored transform for the URDF
+# export). Hand cams are parented here so they ride the arm's kinematics.
+HAND_CAM_PARENT = ROBOT_PATH + "/wrist_3_link/flange"
+HAND_CAM_PARENT_2 = ROBOT_PATH_2 + "/wrist_3_link/flange"
+
+# Tuned camera transforms, saved by the camera-tuning workflow (see
+# sim_cell.camera_tuning) - committed to git, next to the USD it annotates.
+CAMERA_POSES_PATH = os.path.join(REPO_ROOT, "environments", "camera_poses.json")
+
 # The ground plane's collider breaks cuMotion's obstacle scan (recursion bug in
 # pick_and_place's np.reshape shim); excluded via extra_exclude_obstacle_paths instead.
 GROUND_PLANE_COLLISION_PATH = "/World/GroundPlane/CollisionPlane"

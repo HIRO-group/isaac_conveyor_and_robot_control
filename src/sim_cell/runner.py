@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import signal
 
+from cameras.frame_meta import now_us
 from conveyor_indexing.protos import plc, sim_action
 from sim_cell import layout, settings
 from sim_cell.cell import build_cell
@@ -25,6 +26,8 @@ def run(simulation_app) -> None:
 
     control_period_s = 1.0 / settings.CONTROL_HZ
     last_control_time = 0.0
+    camera_period_s = 1.0 / settings.CAMERA_FPS
+    last_camera_time = 0.0
     sim_time = 0.0
     render_count = 0
     tick = 0
@@ -56,6 +59,14 @@ def run(simulation_app) -> None:
                 # indexing runs at the coarser control rate below.
                 cell.pick_place.forward(pick_ready, pick_box_path)
                 cell.pick_place_2.forward(pick_ready_2, pick_box_path_2)
+
+                # Decoupled from the control rate above - paced at CAMERA_FPS (30Hz)
+                # against RENDERING_DT=1/60s, so roughly every 2nd rendered frame.
+                if sim_time - last_camera_time >= camera_period_s:
+                    capture_ts_us = now_us()
+                    for serial, rgb_bytes in cell.camera_rig.capture_all().items():
+                        cell.camera_publisher.publish_frame(serial, rgb_bytes, capture_ts_us)
+                    last_camera_time = sim_time
 
                 if sim_time - last_control_time >= control_period_s:
                     state_msg = plc.StateConveyors()
@@ -93,4 +104,5 @@ def run(simulation_app) -> None:
                 world.render()
     finally:
         cell.tick_logger.close()
+        cell.camera_publisher.close()
         simulation_app.close()

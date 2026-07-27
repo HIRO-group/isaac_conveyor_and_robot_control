@@ -11,10 +11,15 @@ from dataclasses import dataclass
 from isaacsim.core.api import World
 from isaacsim.core.experimental.prims import Articulation, RigidPrim
 
+from cameras.rig import CameraRig
+from cameras.specs import build_camera_list
+from cameras.zenoh_publisher import CameraZenohPublisher
 from conveyor_indexing.line_controller import ConveyorLineController
 from conveyor_indexing.parquet_logger import ConveyorIndexingLogger
-from pick_and_place import MagicAttachPickPlace, UR20_PRE_PLACE_JOINT_POSITIONS_AWAY, create_pedestal_and_robot
+from pick_and_place import UR20_PRE_PLACE_JOINT_POSITIONS_AWAY, MagicAttachPickPlace, create_pedestal_and_robot
 from sim_cell import layout, settings
+from sim_cell.camera_layout import build_camera_specs
+from sim_cell.camera_tuning import maybe_enable_camera_tuning
 from sim_cell.robot_placement import belt_top_z, derive_station_2_geometry
 from sim_cell.stage_setup import StagePrep
 
@@ -31,6 +36,8 @@ class Cell:
     pick_place: MagicAttachPickPlace
     pick_place_2: MagicAttachPickPlace
     tick_logger: ConveyorIndexingLogger
+    camera_rig: CameraRig
+    camera_publisher: CameraZenohPublisher
     box_rigid_prims: dict
     truck_bed_min: tuple
     truck_bed_max: tuple
@@ -139,6 +146,15 @@ def build_cell(stage_prep: StagePrep) -> Cell:
     loop1.set_hold_zone_ready_check(layout.PICK_ZONE_INDEX_2, lambda: pick_place_2.phase_name == "WAITING")
     logger.info("pick/place controllers ready")
 
+    # After world.reset()/robot resets - camera prims (esp. hand cams, parented
+    # under the flange) need the referenced robot geometry already in place.
+    # Missing eclipse-zenoh (see cameras.zenoh_publisher) fails here, before
+    # the main loop, rather than mid-run.
+    camera_specs = build_camera_specs(loop1, loop2)
+    camera_rig = CameraRig(stage, camera_specs)
+    camera_publisher = CameraZenohPublisher(build_camera_list(camera_specs))
+    maybe_enable_camera_tuning(stage, camera_specs)
+
     return Cell(
         world=world,
         loop1=loop1,
@@ -148,6 +164,8 @@ def build_cell(stage_prep: StagePrep) -> Cell:
         pick_place=pick_place,
         pick_place_2=pick_place_2,
         tick_logger=tick_logger,
+        camera_rig=camera_rig,
+        camera_publisher=camera_publisher,
         box_rigid_prims=box_rigid_prims,
         truck_bed_min=stage_prep.truck_bed_min,
         truck_bed_max=stage_prep.truck_bed_max,
