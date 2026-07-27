@@ -18,6 +18,7 @@ from conveyor_indexing.line_controller import ConveyorLineController
 from conveyor_indexing.parquet_logger import ConveyorIndexingLogger
 from pick_and_place import UR20_PRE_PLACE_JOINT_POSITIONS_AWAY, MagicAttachPickPlace, create_pedestal_and_robot
 from sim_cell import layout, settings
+from sim_cell.box_spawner import BoxSpawner
 from sim_cell.camera_layout import build_camera_specs
 from sim_cell.camera_tuning import maybe_enable_camera_tuning
 from sim_cell.robot_placement import belt_top_z, derive_station_2_geometry
@@ -45,6 +46,7 @@ class Cell:
     truck_bed_max: tuple
     robot_xy: tuple
     robot_2_xy: tuple
+    spawner: BoxSpawner
 
 
 def build_cell(stage_prep: StagePrep) -> Cell:
@@ -125,6 +127,11 @@ def build_cell(stage_prep: StagePrep) -> Cell:
     logger.debug("robot dof_positions AFTER reset_to_default_state(): %s", robot.get_dof_positions().numpy())
     logger.info("world.reset() done")
 
+    # Randomizes what's on ConveyorTrack (loop1 zone 0) between training runs - see
+    # sim_cell.box_spawner. Built after world.reset() since it writes through the
+    # same RigidPrim tensor views as everything else here.
+    spawner = BoxSpawner(loop1.zones[0], box_rigid_prims, stage_prep.pool)
+
     # MagicAttachPickPlace builds the cuMotion RmpFlowController, which needs a valid
     # PhysX tensor entity - must happen after world.reset().
     # pre_place_joint_positions override: robot 2 sits on this robot's -X side, so its
@@ -183,4 +190,5 @@ def build_cell(stage_prep: StagePrep) -> Cell:
         truck_bed_max=stage_prep.truck_bed_max,
         robot_xy=settings.ROBOT_POSITION[:2],
         robot_2_xy=station_2.robot_position[:2],
+        spawner=spawner,
     )

@@ -9,7 +9,10 @@ from __future__ import annotations
 import os
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-STAGE_PATH = os.path.join(REPO_ROOT, "environments", "5_conv_env.usd")
+# 5_conv_env_empty.usd is 5_conv_env.usd with every CubeBox_* prim stripped out -
+# sim_cell.stage_setup.box_pool authors a fresh pool of boxes into it instead, so
+# sim_cell.box_spawner can randomize what's on ConveyorTrack run to run.
+STAGE_PATH = os.path.join(REPO_ROOT, "environments", "5_conv_env_empty.usd")
 
 ZONE_NODE_PATHS_LOOP1 = [
     "/World/ConveyorTrack/ConveyorBeltGraph/ConveyorNode",
@@ -57,9 +60,11 @@ CAMERA_POSES_PATH = os.path.join(REPO_ROOT, "environments", "camera_poses.json")
 # pick_and_place's np.reshape shim); excluded via extra_exclude_obstacle_paths instead.
 GROUND_PLANE_COLLISION_PATH = "/World/GroundPlane/CollisionPlane"
 
-# 5_conv_env.usd ships ~18 pre-placed CubeBox_* prims with no physics schemas of their
-# own; discovered at runtime (sim_cell.stage_setup.boxes.discover_box_prim_paths) and
-# given physics by apply_box_physics.
+# sim_cell.stage_setup.box_pool authors a pool of CubeBox_* prims (parked, physics
+# disabled) into the box-less 5_conv_env_empty.usd at prep time; discovered here the
+# same way the original pre-placed pallet was (sim_cell.stage_setup.boxes.
+# discover_box_prim_paths) and given physics by apply_box_physics. sim_cell.box_spawner
+# then teleports/re-enables pool prims onto ConveyorTrack at runtime.
 BOX_PRIM_NAME_PREFIX = "CubeBox_"
 
 CONVEYOR_TRACK_ROOTS = (

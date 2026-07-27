@@ -89,13 +89,18 @@ def run(simulation_app) -> None:
                     commands_msg = sim_action.SimConveyorCommands()
                     cell.loop1.step(state_msg, commands_msg, box_positions)
                     cell.loop2.step(state_msg, commands_msg, box_positions)
-                    despawn_boxes_in_truck(
+                    landed_box_paths = despawn_boxes_in_truck(
                         cell.box_rigid_prims,
                         box_positions,
                         layout.TRUCK_PATH,
                         cell.truck_bed_min,
                         cell.truck_bed_max,
                     )
+                    # Recycle truck-landed boxes back into the pool, then spawn a new
+                    # wave if ConveyorTrack (loop1 zone 0) just emptied out - reuses
+                    # the occupancy loop1.step already computed this tick.
+                    cell.spawner.release(landed_box_paths)
+                    cell.spawner.update(sim_time, cell.loop1.occupied[0])
                     cell.tick_logger.log_tick(
                         tick=tick,
                         sim_time_s=sim_time,
