@@ -1,0 +1,25 @@
+[project]
+name = "conveyor-indexing"
+version = "0.1.0"
+description = "Zone-accumulation conveyor indexing + UR20 pick-and-place scaffold for Isaac Sim"
+requires-python = ">=3.10"
+
+# No build backend / install step: this repo doesn't get pip-installed, even
+# in editable mode. scripts/run.sh puts src/ on PYTHONPATH directly - see the
+# top-level README's "Setup" section. This file exists for tooling only
+# (mypy/ruff below), so `src` is a real Python package layout for editors and
+# linters without requiring a packaging step to run the sim.
+
+[tool.mypy]
+mypy_path = "src"
+namespace_packages = true
+explicit_package_bases = true
+
+[tool.ruff]
+line-length = 120
+src = ["src"]
+
+[tool.ruff.lint]
+# Isaac Sim / omni / pxr / cumotion aren't installed outside Isaac Sim's own
+# bundled interpreter, so import-resolution lint (F401 unused-import aside)
+# isn't reliable here; keep the default rule set otherwise.
