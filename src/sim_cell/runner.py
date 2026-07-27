@@ -28,7 +28,6 @@ def run(simulation_app) -> None:
     last_control_time = 0.0
     camera_period_s = 1.0 / settings.CAMERA_FPS
     last_camera_time = 0.0
-    sim_time = 0.0
     render_count = 0
     tick = 0
     pick_ready = False
@@ -52,28 +51,51 @@ def run(simulation_app) -> None:
     try:
         while simulation_app.is_running() and not shutdown_requested:
             if world.is_playing():
-                world.step(render=True)
-                sim_time += world.get_physics_dt()
+                # Physics-only step every iteration - the full CONTROL_HZ rate
+                # pick-and-place needs for smooth convergence. Rendering (6 camera
+                # render products + viewport) is decoupled below and only paid for
+                # on iterations that actually need a fresh camera frame; `render=True`
+                # would otherwise render at RENDERING_DT (60Hz) even though frames
+                # are only ever consumed at CAMERA_FPS (30Hz) - twice the RTX work
+                # this loop actually uses.
+                world.step(render=False)
+                sim_time = world.current_time
 
                 # Pick-and-place runs every physics step for smooth convergence; conveyor
                 # indexing runs at the coarser control rate below.
                 cell.pick_place.forward(pick_ready, pick_box_path)
                 cell.pick_place_2.forward(pick_ready_2, pick_box_path_2)
 
-                # Decoupled from the control rate above - paced at CAMERA_FPS (30Hz)
-                # against RENDERING_DT=1/60s, so roughly every 2nd rendered frame.
+                # Paced at CAMERA_FPS (30Hz). world.render() refreshes render products
+                # (and the viewport) without stepping physics again - see
+                # SimulationContext.render(), which disables playSimulations for the
+                # duration of its app.update() call.
                 if sim_time - last_camera_time >= camera_period_s:
+                    world.render()
                     capture_ts_us = now_us()
                     for serial, rgb_bytes in cell.camera_rig.capture_all().items():
                         cell.camera_publisher.publish_frame(serial, rgb_bytes, capture_ts_us)
                     last_camera_time = sim_time
 
                 if sim_time - last_control_time >= control_period_s:
+                    # One batched pose read for every box, reused below by
+                    # ConveyorLineController.step, despawn_boxes_in_truck, and
+                    # evaluate_pick_station - instead of each of them calling
+                    # get_world_poses() per box (a GPU sync + host copy every time).
+                    positions, _ = cell.box_positions_view.get_world_poses()
+                    box_positions = dict(zip(cell.box_paths_ordered, positions.numpy()))
+
                     state_msg = plc.StateConveyors()
                     commands_msg = sim_action.SimConveyorCommands()
-                    cell.loop1.step(state_msg, commands_msg)
-                    cell.loop2.step(state_msg, commands_msg)
-                    despawn_boxes_in_truck(cell.box_rigid_prims, layout.TRUCK_PATH, cell.truck_bed_min, cell.truck_bed_max)
+                    cell.loop1.step(state_msg, commands_msg, box_positions)
+                    cell.loop2.step(state_msg, commands_msg, box_positions)
+                    despawn_boxes_in_truck(
+                        cell.box_rigid_prims,
+                        box_positions,
+                        layout.TRUCK_PATH,
+                        cell.truck_bed_min,
+                        cell.truck_bed_max,
+                    )
                     cell.tick_logger.log_tick(
                         tick=tick,
                         sim_time_s=sim_time,
@@ -85,13 +107,13 @@ def run(simulation_app) -> None:
                     pick_ready, pick_box_path = evaluate_pick_station(
                         cell.loop1.zones[layout.PICK_ZONE_INDEX],
                         cell.loop1.machine_states[layout.PICK_ZONE_INDEX],
-                        cell.box_rigid_prims,
+                        box_positions,
                         cell.robot_xy,
                     )
                     pick_ready_2, pick_box_path_2 = evaluate_pick_station(
                         cell.loop1.zones[layout.PICK_ZONE_INDEX_2],
                         cell.loop1.machine_states[layout.PICK_ZONE_INDEX_2],
-                        cell.box_rigid_prims,
+                        box_positions,
                         cell.robot_2_xy,
                     )
                     last_control_time = sim_time

@@ -50,11 +50,15 @@ def overlap_box_prim_paths(
 def leading_occupant_path(
     travel_direction: "Gf.Vec3f | None",
     hit_paths: list,
-    box_rigid_prims: dict,
+    box_positions: dict,
     zone_name: str = "",
 ) -> str | None:
     """Pick whichever occupying box is furthest downstream - hit_paths isn't
     in spatial order, so hit_paths[0] could be a trailing box instead.
+
+    `box_positions` is {path: (x, y, z)}, precomputed once per control tick
+    from a single batched RigidPrim read (see sim_cell.runner) rather than
+    queried per-box here.
     """
     if not hit_paths:
         return None
@@ -63,8 +67,7 @@ def leading_occupant_path(
         raise RuntimeError(f"{zone_name} has no world_travel_direction set")
 
     def _downstream(path: str) -> float:
-        box_pos, _ = box_rigid_prims[path].get_world_poses()
-        pos = box_pos.numpy()[0]
+        pos = box_positions[path]
         return float(
             pos[0] * travel_direction[0] + pos[1] * travel_direction[1] + pos[2] * travel_direction[2]
         )

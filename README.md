@@ -194,6 +194,14 @@ deliberately omitted (notify/health, future work).
    ```bash
    ZENOH_ROUTER=tcp/127.0.0.1:7447 DISPLAY=:0 bash /home/ubuntu/conveyor_indexing/scripts/run.sh
    ```
+
+   For data-collection runs where wall-clock throughput matters (faster than
+   realtime), skip the GUI window entirely with `CONVEYOR_INDEXING_HEADLESS=1`
+   (camera publishing and logging are unaffected - only the viewport and its
+   `DISPLAY` requirement go away):
+   ```bash
+   CONVEYOR_INDEXING_HEADLESS=1 bash /home/ubuntu/conveyor_indexing/scripts/run.sh
+   ```
 3. Verify the camera contract without theia at all: with the sim running,
    in another shell:
    ```bash

@@ -55,8 +55,12 @@ class ConveyorLineController:
         """
         self._box_rigid_prims = box_rigid_prims
 
-    def step(self, state_msg, commands_msg) -> None:
-        """Advance every zone by one control tick, appending into shared log messages."""
+    def step(self, state_msg, commands_msg, box_positions: dict) -> None:
+        """Advance every zone by one control tick, appending into shared log messages.
+
+        `box_positions` is {path: (x, y, z)}, precomputed once per control tick from a
+        single batched RigidPrim read (see sim_cell.runner) rather than queried per-box.
+        """
         self.occupied = [zone.check_occupied() for zone in self.zones]
 
         n = len(self.zones)
@@ -90,14 +94,12 @@ class ConveyorLineController:
             if i in self.hold_zone_indices and self._box_rigid_prims is not None and self.occupied[i]:
                 occupying_paths = zone.get_occupying_prim_paths()
                 leading_path = leading_occupant_path(
-                    zone.world_travel_direction, occupying_paths, self._box_rigid_prims, zone_name=zone.node_path
+                    zone.world_travel_direction, occupying_paths, box_positions, zone_name=zone.node_path
                 )
-                box_rigid_prim = self._box_rigid_prims.get(leading_path) if leading_path is not None else None
-                if box_rigid_prim is not None:
-                    position, _ = box_rigid_prim.get_world_poses()
+                if leading_path is not None:
                     # is_last has open ground past it, not another zone - tuned separately.
                     stop_fraction = 0.8 if is_last else 0.8
-                    at_stop_position = zone.is_past_center(position.numpy()[0], stop_fraction=stop_fraction)
+                    at_stop_position = zone.is_past_center(box_positions[leading_path], stop_fraction=stop_fraction)
 
             observation, command = zone.state_machine.step(
                 occupied=self.occupied[i],

@@ -8,13 +8,20 @@ bindings) - see the top-level README's "Setup" section.
 
 from __future__ import annotations
 
+import os
+
 if __name__ == "__main__":
-    # SimulationApp must be constructed before any omni.*/carb/isaacsim/cumotion
-    # import - so every import below is deferred until here, inside the guard,
-    # rather than living at module scope.
+    # SimulationApp must be constructed before any omni.*/carb/isaacsim/
+    # cumotion import - so every import below is deferred until here, inside
+    # the guard, rather than living at module scope.
     from isaacsim import SimulationApp
 
-    simulation_app = SimulationApp({"headless": False})
+    # Opt-in, not default: this repo's existing workflows (camera tuning, live
+    # noVNC debugging - see README "Setup"/"Camera tuning") all assume a GUI
+    # window, so headless stays behind an explicit env var rather than flipping
+    # the default under them.
+    headless = os.environ.get("CONVEYOR_INDEXING_HEADLESS", "") == "1"
+    simulation_app = SimulationApp({"headless": headless})
 
     from sim_cell.log_setup import configure_logging
     from sim_cell.runner import run

@@ -37,17 +37,26 @@ def truck_body_world_bounds(stage: Usd.Stage, truck_path: str) -> tuple:
 
 
 def despawn_boxes_in_truck(
-    box_rigid_prims: dict, truck_path: str, truck_bed_min: "Gf.Vec3d", truck_bed_max: "Gf.Vec3d"
+    box_rigid_prims: dict,
+    box_positions: dict,
+    truck_path: str,
+    truck_bed_min: "Gf.Vec3d",
+    truck_bed_max: "Gf.Vec3d",
 ) -> None:
     """Disable, hide, and park any box that's fallen inside the truck bed AABB.
+
+    `box_positions` is {path: (x, y, z)}, precomputed once per control tick from a
+    single batched RigidPrim read (see sim_cell.runner) rather than queried per-box
+    here; `box_rigid_prims` is still needed for the per-box writes below.
 
     Deleting the prim outright crashes the app: RigidPrim's shared PhysX tensor
     view gets invalidated for every other tracked box too.
     """
     landed_paths = []
-    for box_path, rigid_prim in box_rigid_prims.items():
-        x, y, z = rigid_prim.get_world_poses()[0].numpy()[0]
-        if truck_bed_min[0] <= x <= truck_bed_max[0] and truck_bed_min[1] <= y <= truck_bed_max[1] and z <= truck_bed_max[2]:
+    for box_path, (x, y, z) in box_positions.items():
+        in_x = truck_bed_min[0] <= x <= truck_bed_max[0]
+        in_y = truck_bed_min[1] <= y <= truck_bed_max[1]
+        if in_x and in_y and z <= truck_bed_max[2]:
             landed_paths.append(box_path)
     for box_path in landed_paths:
         rigid_prim = box_rigid_prims[box_path]

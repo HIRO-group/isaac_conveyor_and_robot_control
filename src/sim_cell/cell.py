@@ -39,6 +39,8 @@ class Cell:
     camera_rig: CameraRig
     camera_publisher: CameraZenohPublisher
     box_rigid_prims: dict
+    box_paths_ordered: list
+    box_positions_view: RigidPrim
     truck_bed_min: tuple
     truck_bed_max: tuple
     robot_xy: tuple
@@ -101,6 +103,14 @@ def build_cell(stage_prep: StagePrep) -> Cell:
     place_belt_top_z_2 = belt_top_z(place_zone_2.belt_prim)
 
     box_rigid_prims = {path: RigidPrim(path) for path in stage_prep.box_paths}
+    # Single batched view over every box for position reads - the per-box RigidPrims
+    # above stay in use for the writes (despawn, magic attach) that only ever touch
+    # one box at a time; reads are the hot path (evaluate_pick_station,
+    # ConveyorLineController.step, despawn_boxes_in_truck all need every box's
+    # position every control tick) so those go through one GPU->host transfer here
+    # instead of one per box per call site.
+    box_paths_ordered = stage_prep.box_paths
+    box_positions_view = RigidPrim(box_paths_ordered)
     # Only loop1 has hold zones needing is_past_center() checks against a real box position.
     loop1.set_box_rigid_prims(box_rigid_prims)
     logger.info("robots ready, calling world.reset()")
@@ -167,6 +177,8 @@ def build_cell(stage_prep: StagePrep) -> Cell:
         camera_rig=camera_rig,
         camera_publisher=camera_publisher,
         box_rigid_prims=box_rigid_prims,
+        box_paths_ordered=box_paths_ordered,
+        box_positions_view=box_positions_view,
         truck_bed_min=stage_prep.truck_bed_min,
         truck_bed_max=stage_prep.truck_bed_max,
         robot_xy=settings.ROBOT_POSITION[:2],
