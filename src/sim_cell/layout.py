@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import os
 
-STAGE_PATH = os.path.join(os.path.expanduser("~"), "5_conv_env.usd")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+STAGE_PATH = os.path.join(REPO_ROOT, "environments", "5_conv_env.usd")
 
 ZONE_NODE_PATHS_LOOP1 = [
     "/World/ConveyorTrack/ConveyorBeltGraph/ConveyorNode",
