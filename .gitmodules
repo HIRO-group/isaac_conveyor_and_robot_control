@@ -1,0 +1,4 @@
+[submodule "proto"]
+	path = proto
+	url = git@github.com:HIRO-group/conveyor_indexing_protos.git
+	branch = main
