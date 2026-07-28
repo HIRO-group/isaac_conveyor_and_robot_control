@@ -565,6 +565,7 @@ comment) - `scripts/run.sh` puts `src/` directly on `PYTHONPATH` instead (see
 | `src/conveyor_indexing/zone.py` | `ConveyorZone` - one zone's USD ConveyorNode + belt bbox + occupancy. |
 | `src/conveyor_indexing/line_controller.py` | `ConveyorLineController` - wires a line's zones together, neighbor occupancy, hold-zone overflow. |
 | `src/conveyor_indexing/parquet_logger.py` | `ConveyorIndexingLogger` - background-batched parquet writer, schema-compatible with theia's real data collection. |
+| `src/conveyor_indexing/episode_recorder.py` | `EpisodeRecorder` - 30Hz synchronized image+state training rows (see "Recording training data" below). |
 | `src/conveyor_indexing/{belt_geometry,occupancy,directions,telemetry,protos}.py` | Supporting atomic modules - belt-top bbox math, PhysX overlap queries, direction-correction geometry, proto message building, and the single point the generated proto bindings are imported from. |
 | `src/pick_and_place/controller.py` | `MagicAttachPickPlace` - the pick-and-place phase state machine. |
 | `src/pick_and_place/motion_planner.py` | cuMotion `GraphBasedMotionPlanner` construction, incl. the obstacle-scan retry loop. |
@@ -579,6 +580,7 @@ comment) - `scripts/run.sh` puts `src/` directly on `PYTHONPATH` instead (see
 | `src/sim_cell/camera_layout.py` | `build_camera_specs()` - derives all 6 camera placements from zone/robot geometry, applies any saved tuning overrides. |
 | `src/sim_cell/camera_tuning.py` | `maybe_enable_camera_tuning()` - the opt-in visualize/adjust/save workflow (see "Camera tuning" above). |
 | `src/sim_cell/cell.py` | `build_cell()` - builds the World, both lines, both robots, both pick-and-place controllers, the camera rig + publisher. |
+| `src/sim_cell/recording.py` | Recording glue: env-var gating, camera-serial->role map, the episode key tracker, and the observation.state layout. |
 | `src/sim_cell/runner.py` | `run()` - the main control loop. |
 | `src/sim_cell/log_setup.py` | Attaches stdout logging handlers to each package's root logger (see "Logging" below). |
 | `robot_configs/generate_ur20_spheres_lula.py` | Generates per-link collision spheres via Lula's built-in generator. |
@@ -590,6 +592,41 @@ comment) - `scripts/run.sh` puts `src/` directly on `PYTHONPATH` instead (see
 | `environments/camera_poses.json` | Tuned camera transforms saved by the camera-tuning workflow (see "Camera tuning" above); absent on a fresh checkout until first tuned. |
 | `gen_proto.sh` | Generates Python bindings for theia's real state schema, the sim action schema, and the sim camera schema. |
 | `pyproject.toml` | Tooling config only (mypy/ruff) - see "Repo layout" above for why there's no install step. |
+
+## Recording training data
+
+Set `CONVEYOR_INDEXING_RECORD=1` to record synchronized 30Hz training rows
+into `data/recordings/` (default off; separate from the 120Hz tick log in
+`data/` so the two parquet streams never mix):
+
+```bash
+CONVEYOR_INDEXING_RECORD=1 CONVEYOR_INDEXING_HEADLESS=1 bash scripts/run.sh
+```
+
+Each row is captured in a single main-loop iteration - all 6 camera frames,
+both arms' joint positions (radians, `Articulation` dof order - logged at
+startup as `robot dof_names`), a suction/cups block per arm mirroring the
+magic attach state, the latest `StateConveyors` snapshot, and an episode key
+that increments whenever either arm starts a pick. Extra columns
+(`tick`, `sim_time_s`, `phase_1`, `phase_2`) support re-segmenting episodes
+at conversion time instead of re-collecting. Full schema:
+`src/conveyor_indexing/episode_recorder.py`; state-vector layout and
+serial->role mapping: `src/sim_cell/recording.py`.
+
+Sizing: rows are ~5.5MB raw (6 x 640x480 RGB) at 30Hz; budget roughly
+1-4GB/min on disk after parquet zstd, depending on scene content and how far
+below realtime the sim runs. Files rotate at episode boundaries (~900 rows).
+If the writer can't keep up it drops rows rather than stalling the sim and
+logs a warning plus a final drop count - a recording with drops has time
+gaps and should not be used for training.
+
+The output is schema-compatible with theia's `dc_to_lerobot.py` converter
+(dual-arm layout needs its `--arms 2` flag):
+
+```bash
+python dc_to_lerobot.py --data-dir <this repo>/data/recordings \
+    --root <output dataset dir> --arms 2 --fps 30
+```
 
 ## Logging
 

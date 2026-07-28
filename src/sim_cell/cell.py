@@ -14,6 +14,7 @@ from isaacsim.core.experimental.prims import Articulation, RigidPrim
 from cameras.rig import CameraRig
 from cameras.specs import build_camera_list
 from cameras.zenoh_publisher import CameraZenohPublisher
+from conveyor_indexing.episode_recorder import EpisodeRecorder
 from conveyor_indexing.line_controller import ConveyorLineController
 from conveyor_indexing.parquet_logger import ConveyorIndexingLogger
 from pick_and_place import UR20_PRE_PLACE_JOINT_POSITIONS_AWAY, MagicAttachPickPlace, create_pedestal_and_robot
@@ -21,6 +22,7 @@ from sim_cell import layout, settings
 from sim_cell.box_spawner import BoxSpawner
 from sim_cell.camera_layout import build_camera_specs
 from sim_cell.camera_tuning import maybe_enable_camera_tuning
+from sim_cell.recording import maybe_build_recorder
 from sim_cell.robot_placement import belt_top_z, derive_station_2_geometry
 from sim_cell.stage_setup import StagePrep
 
@@ -39,6 +41,7 @@ class Cell:
     tick_logger: ConveyorIndexingLogger
     camera_rig: CameraRig
     camera_publisher: CameraZenohPublisher
+    episode_recorder: EpisodeRecorder | None
     box_rigid_prims: dict
     box_paths_ordered: list
     box_positions_view: RigidPrim
@@ -125,6 +128,8 @@ def build_cell(stage_prep: StagePrep) -> Cell:
     check_pos, _ = robot.get_world_poses()
     logger.debug("robot base pose AFTER world.reset(): %s", check_pos.numpy())
     logger.debug("robot dof_positions AFTER reset_to_default_state(): %s", robot.get_dof_positions().numpy())
+    # Recorded observation.state joint order follows this - see sim_cell.recording.
+    logger.info("robot dof_names: %s", robot.dof_names)
     logger.info("world.reset() done")
 
     # Randomizes what's on ConveyorTrack (loop1 zone 0) between training runs - see
@@ -171,6 +176,7 @@ def build_cell(stage_prep: StagePrep) -> Cell:
     camera_rig = CameraRig(stage, camera_specs)
     camera_publisher = CameraZenohPublisher(build_camera_list(camera_specs))
     maybe_enable_camera_tuning(stage, camera_specs)
+    episode_recorder = maybe_build_recorder(camera_specs)
 
     return Cell(
         world=world,
@@ -183,6 +189,7 @@ def build_cell(stage_prep: StagePrep) -> Cell:
         tick_logger=tick_logger,
         camera_rig=camera_rig,
         camera_publisher=camera_publisher,
+        episode_recorder=episode_recorder,
         box_rigid_prims=box_rigid_prims,
         box_paths_ordered=box_paths_ordered,
         box_positions_view=box_positions_view,

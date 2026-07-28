@@ -196,3 +196,8 @@ class MagicAttachPickPlace:
     @property
     def phase_name(self) -> str:
         return self._phase.name
+
+    @property
+    def holding_box(self) -> bool:
+        """True from ATTACH until DETACH - the sim's stand-in for suction/cup DIO state."""
+        return self._holding_box
