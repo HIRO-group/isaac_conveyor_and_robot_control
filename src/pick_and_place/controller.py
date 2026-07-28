@@ -201,3 +201,11 @@ class MagicAttachPickPlace:
     def holding_box(self) -> bool:
         """True from ATTACH until DETACH - the sim's stand-in for suction/cup DIO state."""
         return self._holding_box
+
+    @property
+    def held_box_path(self) -> str | None:
+        """The box prim path this arm is currently carrying, else None - same
+        ATTACH..DETACH window as holding_box. Ground-truth recording
+        (sim_cell.recording) uses this for BoxState.held_by_arm.
+        """
+        return self._box_path if self._holding_box else None

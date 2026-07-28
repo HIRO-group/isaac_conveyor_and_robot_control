@@ -36,9 +36,14 @@ ConveyorIndexingLogger this writer:
     next reference_req_id change so the converter's don't-cross-file-boundary
     rule never truncates a window mid-episode.
 
-HWC->CHW transposes and NPZ encoding happen on the writer thread; ``record()``
-only builds a dict and enqueues (frames from CameraRig.capture_all() are
-freshly allocated per call, so handing them off is safe).
+HWC->CHW transposes and NPZ encoding happen off the writer thread, in a small
+pool (``encode_workers``); ``record()`` only builds a dict and enqueues
+(frames from CameraRig.capture_all() are freshly allocated per call, so
+handing them off is safe). Measured throughput on the dev L4: ~43 rows/s
+sustained (synthetic 5.5MB rows, zstd level 1, 3 encode workers) - comfortably
+above the ~7-15 rows/s a single faster-than-today sim instance would need, so
+this is the mitigation for queue-full drops as the sim gets faster than its
+current ~0.23x realtime.
 """
 
 from __future__ import annotations
@@ -49,6 +54,7 @@ import pathlib
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -80,6 +86,8 @@ class EpisodeRecorder:
         rotate_after_rows: int = 900,
         queue_maxsize: int = 60,
         compression: str | None = "zstd",
+        compression_level: int | None = 1,
+        encode_workers: int = 3,
     ) -> None:
         self.output_dir = pathlib.Path(output_dir).expanduser()
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -90,6 +98,14 @@ class EpisodeRecorder:
         self.batch_size = max(1, batch_size)
         self.rotate_after_rows = max(1, rotate_after_rows)
         self.compression = compression
+        self.compression_level = compression_level
+
+        # HWC->CHW transpose + np.savez (zip/CRC32) is CPU-bound and releases the
+        # GIL for its bulk work, so farming it out to a small pool lets encoding
+        # of row N+1 overlap the writer thread's zstd-encode/write of row N -
+        # needed once the sim runs faster than the ~7 rows/s a single thread
+        # measured doing both jobs serially (see the top-of-file docstring).
+        self._encode_pool = ThreadPoolExecutor(max_workers=max(1, encode_workers), thread_name_prefix="episode-recorder-encode")
 
         # Fixed per run so files sort chronologically across runs sharing the dir.
         self._run_prefix = int(time.time() * 1e3)
@@ -184,7 +200,11 @@ class EpisodeRecorder:
                     self._flush_rows(pending)
                 break
 
-            item["observation.images"] = self._encode_images(item.pop("frames"))
+            # Submitted immediately (rather than encoded inline) so image encoding
+            # for this row overlaps the writer thread's zstd-encode/write of the
+            # previous batch; resolved in _flush_rows, in submission order, so
+            # column order still matches row order despite running off-thread.
+            item["_images_future"] = self._encode_pool.submit(self._encode_images, item.pop("frames"))
             if self._should_rotate(item["reference_req_id"], len(pending)):
                 # Flush before cutting so rows queued ahead of the boundary stay
                 # in the old file - the cut must fall exactly between episodes.
@@ -217,6 +237,8 @@ class EpisodeRecorder:
         return self.output_dir / f"{self._run_prefix}_{self._file_seq:04d}.parquet"
 
     def _flush_rows(self, rows: list) -> None:
+        for row in rows:
+            row["observation.images"] = row.pop("_images_future").result()
         columns = {name: [r[name] for r in rows] for name in self._schema.names}
         table = pa.Table.from_pydict(columns, schema=self._schema)
         if self._writer is None:
@@ -225,6 +247,7 @@ class EpisodeRecorder:
                 where=str(self._current_path()),
                 schema=self._schema,
                 compression=self.compression,
+                compression_level=self.compression_level if self.compression else None,
             )
         self._writer.write_table(table)
         self._rows_in_file += len(rows)
@@ -233,6 +256,7 @@ class EpisodeRecorder:
     def close(self) -> None:
         self._queue.put(self._SENTINEL)
         self._thread.join()
+        self._encode_pool.shutdown(wait=True)
         if self._writer is not None:
             self._writer.close()
             self._writer = None

@@ -12,19 +12,21 @@ from isaacsim.core.api import World
 from isaacsim.core.experimental.prims import Articulation, RigidPrim
 
 from cameras.rig import CameraRig
-from cameras.specs import build_camera_list
+from cameras.specs import CameraSpec, build_camera_list
 from cameras.zenoh_publisher import CameraZenohPublisher
 from conveyor_indexing.episode_recorder import EpisodeRecorder
 from conveyor_indexing.line_controller import ConveyorLineController
+from conveyor_indexing.mcap_recorder import McapRecorder
 from conveyor_indexing.parquet_logger import ConveyorIndexingLogger
 from pick_and_place import UR20_PRE_PLACE_JOINT_POSITIONS_AWAY, MagicAttachPickPlace, create_pedestal_and_robot
 from sim_cell import layout, settings
 from sim_cell.box_spawner import BoxSpawner
 from sim_cell.camera_layout import build_camera_specs
 from sim_cell.camera_tuning import maybe_enable_camera_tuning
-from sim_cell.recording import maybe_build_recorder
+from sim_cell.recording import maybe_build_mcap_recorder, maybe_build_recorder
 from sim_cell.robot_placement import belt_top_z, derive_station_2_geometry
 from sim_cell.stage_setup import StagePrep
+from sim_cell.stage_setup.box_pool import BoxPool
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +42,10 @@ class Cell:
     pick_place_2: MagicAttachPickPlace
     tick_logger: ConveyorIndexingLogger
     camera_rig: CameraRig
+    camera_specs: list[CameraSpec]
     camera_publisher: CameraZenohPublisher
     episode_recorder: EpisodeRecorder | None
+    mcap_recorder: McapRecorder | None
     box_rigid_prims: dict
     box_paths_ordered: list
     box_positions_view: RigidPrim
@@ -50,6 +54,7 @@ class Cell:
     robot_xy: tuple
     robot_2_xy: tuple
     spawner: BoxSpawner
+    pool: BoxPool
 
 
 def build_cell(stage_prep: StagePrep) -> Cell:
@@ -177,6 +182,10 @@ def build_cell(stage_prep: StagePrep) -> Cell:
     camera_publisher = CameraZenohPublisher(build_camera_list(camera_specs))
     maybe_enable_camera_tuning(stage, camera_specs)
     episode_recorder = maybe_build_recorder(camera_specs)
+    # spawner.seed is only known after BoxSpawner's own construction above (see
+    # its __init__) - RunMetadata needs the real seed, not the env var, since
+    # an unset CONVEYOR_INDEXING_SPAWN_SEED gets a fresh random one each run.
+    mcap_recorder = maybe_build_mcap_recorder(camera_specs, spawner.seed)
 
     return Cell(
         world=world,
@@ -188,8 +197,10 @@ def build_cell(stage_prep: StagePrep) -> Cell:
         pick_place_2=pick_place_2,
         tick_logger=tick_logger,
         camera_rig=camera_rig,
+        camera_specs=camera_specs,
         camera_publisher=camera_publisher,
         episode_recorder=episode_recorder,
+        mcap_recorder=mcap_recorder,
         box_rigid_prims=box_rigid_prims,
         box_paths_ordered=box_paths_ordered,
         box_positions_view=box_positions_view,
@@ -198,4 +209,5 @@ def build_cell(stage_prep: StagePrep) -> Cell:
         robot_xy=settings.ROBOT_POSITION[:2],
         robot_2_xy=station_2.robot_position[:2],
         spawner=spawner,
+        pool=stage_prep.pool,
     )

@@ -7,6 +7,14 @@
 #     with theia's real camera.proto, but generated from this repo's own copy;
 #     see proto/sim_camera.proto's header comment for why)
 #
+# Also generated, needed only when CONVEYOR_INDEXING_RECORD_MCAP=1 (see
+# conveyor_indexing.mcap_recorder):
+#   - theia's real robot.proto + foxglove/raw_image.proto (MCAP channel
+#     schemas mirroring theia's real data-collection service, so
+#     mcap_to_lerobot.py routes sim and real captures identically)
+#   - this directory's sim_state.proto (sim-only ground truth: box
+#     states/events, arm phase transitions, run metadata)
+#
 # Usage:
 #   bash /home/ubuntu/conveyor_indexing/gen_proto.sh
 #
@@ -45,6 +53,22 @@ $PROTOC \
   -I "$SIM_PROTO_DIR" \
   --python_out="$PROTO_OUT" \
   "$SIM_PROTO_DIR/sim_camera.proto"
+
+# MCAP-only bindings (conveyor_indexing.mcap_recorder). robot.proto and
+# foxglove/raw_image.proto have no cross-imports, so each compiles standalone
+# with just $THEIA_ROOT/proto on the include path.
+$PROTOC \
+  -I "$THEIA_ROOT/proto" \
+  --python_out="$PROTO_OUT" \
+  "$THEIA_ROOT/proto/robot/robot.proto" \
+  "$THEIA_ROOT/proto/foxglove/raw_image.proto"
+
+touch "$PROTO_OUT/robot/__init__.py" "$PROTO_OUT/foxglove/__init__.py"
+
+$PROTOC \
+  -I "$SIM_PROTO_DIR" \
+  --python_out="$PROTO_OUT" \
+  "$SIM_PROTO_DIR/sim_state.proto"
 
 echo "Proto generated at $PROTO_OUT"
 echo "scripts/run.sh already puts $PROTO_OUT on PYTHONPATH - just run:"

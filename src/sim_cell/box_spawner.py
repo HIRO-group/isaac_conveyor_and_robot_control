@@ -68,6 +68,10 @@ class BoxSpawner:
             env_seed = os.environ.get(SEED_ENV_VAR)
             seed = int(env_seed) if env_seed is not None else random.SystemRandom().randrange(2**32)
         self._rng = random.Random(seed)
+        # Public (not just logged) so a run's ground-truth recording can carry
+        # the exact seed needed to replay its box waves - see
+        # sim_cell.recording.maybe_build_mcap_recorder's RunMetadata.
+        self.seed = seed
         logger.info("box spawner seed=%d (override with %s)", seed, SEED_ENV_VAR)
 
         self._empty_since: float | None = None
@@ -109,8 +113,14 @@ class BoxSpawner:
         for path in box_paths:
             self._available[self._variant_of(path)].append(path)
 
-    def update(self, sim_time: float, zone_occupied: bool) -> None:
-        """Call once per control tick with ConveyorTrack's current occupancy."""
+    def update(self, sim_time: float, zone_occupied: bool) -> list:
+        """Call once per control tick with ConveyorTrack's current occupancy.
+
+        Returns this call's newly-spawned boxes as ``(path, variant, position,
+        quat_wxyz)`` tuples (empty list on every tick that doesn't spawn a
+        wave) - ground-truth recording (sim_cell.recording) uses this to emit
+        BOX_EVENT_SPAWNED without needing its own spawn-detection logic.
+        """
         if not self._parked:
             self._park_all_pool_boxes()
             self._parked = True
@@ -118,23 +128,22 @@ class BoxSpawner:
         if self._last_spawn_time is None:
             # Belt starts empty - spawn the first wave immediately rather than
             # waiting out the debounce.
-            self._spawn_wave(sim_time, INITIAL_WAVE_COUNT)
-            return
+            return self._spawn_wave(sim_time, INITIAL_WAVE_COUNT)
 
         if zone_occupied:
             self._empty_since = None
-            return
+            return []
         if self._empty_since is None:
             self._empty_since = sim_time
         if sim_time - self._empty_since < EMPTY_DEBOUNCE_S:
-            return
+            return []
         if sim_time - self._last_spawn_time < SPAWN_COOLDOWN_S:
-            return
+            return []
         if not self._total_available():
             logger.debug("zone empty but pool exhausted - nothing to spawn")
-            return
+            return []
 
-        self._spawn_wave(sim_time, self._rng.randint(WAVE_COUNT_MIN, WAVE_COUNT_MAX))
+        return self._spawn_wave(sim_time, self._rng.randint(WAVE_COUNT_MIN, WAVE_COUNT_MAX))
 
     def _variant_of(self, box_path: str) -> str:
         for variant, paths in self._pool.paths_by_variant.items():
@@ -145,12 +154,12 @@ class BoxSpawner:
     def _total_available(self) -> int:
         return sum(len(paths) for paths in self._available.values())
 
-    def _spawn_wave(self, sim_time: float, requested_count: int) -> None:
+    def _spawn_wave(self, sim_time: float, requested_count: int) -> list:
         count = min(requested_count, self._total_available())
         if count < requested_count:
             logger.warning("wave shrunk from %d to %d box(es) - pool exhausted", requested_count, count)
         if count == 0:
-            return
+            return []
 
         variants_in_stock = [v for v, paths in self._available.items() if paths]
         max_half_diag = max(math.hypot(*self._pool.half_extents_by_variant[v][:2]) for v in variants_in_stock)
@@ -192,11 +201,12 @@ class BoxSpawner:
             quat_wxyz = (math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0))
 
             self._place(path, position, quat_wxyz)
-            spawned.append((path, variant, position))
+            spawned.append((path, variant, position, quat_wxyz))
 
         self._last_spawn_time = sim_time
         self._empty_since = None
         logger.info("spawned wave of %d box(es) at t=%.2f: %s", len(spawned), sim_time, spawned)
+        return spawned
 
     def _place(self, path: str, position: tuple, quat_wxyz: tuple) -> None:
         """Teleport + revive one pool box (inverse of despawn_boxes_in_truck)."""

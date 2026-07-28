@@ -4,11 +4,16 @@ robot placement, and logging output location.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 # .../conveyor_indexing/src/sim_cell/settings.py -> .../conveyor_indexing
 REPO_ROOT = Path(__file__).resolve().parents[2]
-LOG_OUTPUT_DIR = str(REPO_ROOT / "data")
+# Overridable so N parallel sim instances (e.g. one per Vertex AI job) can each
+# write to their own directory instead of colliding on a shared checkout's
+# data/ - see sim_cell.recording, which derives the recordings/mcap subdirs
+# from this, and conveyor_indexing.parquet_logger's tick log.
+LOG_OUTPUT_DIR = os.environ.get("CONVEYOR_INDEXING_DATA_DIR", str(REPO_ROOT / "data"))
 
 CONTROL_HZ = 120.0  # matches physics rate; 30Hz let boxes drift past hold points before the belt reacted
 PHYSICS_DT = 1.0 / 120.0
