@@ -56,6 +56,26 @@ Useful environment variables:
 - `ZENOH_ROUTER=tcp/127.0.0.1:7447` — connect to a running Zenoh router
   instead of opening a peer-to-peer session.
 
+## Local data collection
+
+`scripts/collect_local.py` (stock `python3`, stdlib only) runs a headless
+MCAP-recording sim and streams each closed `.mcap` file to
+`gs://por-theia-1/data_collection/sim/<run_id>/instance_00/mcap/`, deleting
+local copies after a verified upload so multi-hour runs never fill the disk:
+
+```bash
+# Short run, files also kept locally (e.g. to inspect in Foxglove):
+python3 scripts/collect_local.py --sim-seconds 600 --keep-local
+
+# Long unattended run (~0.23x realtime on an L4 - plan wall time accordingly):
+nohup python3 scripts/collect_local.py --sim-seconds 14400 > /dev/null 2>&1 &
+tail -f data/collect/<run_id>/collect.log
+```
+
+`--sweep-only --run-id <run_id>` uploads whatever a crashed/rebooted run left
+behind. `scripts/foxglove_sim_layout.json` is a Foxglove layout (6 camera
+panels, conveyor speeds, arm joints/phases) for viewing the recorded MCAPs.
+
 ## Citation
 
 If you use this code in your research, please cite:

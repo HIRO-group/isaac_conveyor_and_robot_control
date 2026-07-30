@@ -4,11 +4,16 @@ sim's camera rig, and captures RGB8 frames from them each tick.
 This machine is CPU-throttled (see the top-level README's "Design" section),
 so the capture path after rendering stays on the GPU wherever possible:
 Replicator's "rgb" annotator is asked for its data on the `cuda` device (a
-zero-copy Warp array), converted to a Torch tensor via `warp.torch.to_torch`
+zero-copy Warp array), converted to a Torch tensor via `warp.to_torch`
 (also zero-copy), and the RGBA->RGB slice + contiguous-copy happen on the
 GPU - only the final, already-RGB buffer crosses the PCIe bus to host
 memory, once per frame. Falls back to the CPU annotator path (logged once)
 if the CUDA/Torch interop isn't available in a given Isaac Sim install.
+
+`warp-lang` isn't bundled by Isaac Sim's launcher python by default - install
+it with `/home/ubuntu/IsaacSim/python.sh -m pip install warp-lang` (also done
+by scripts/setup.sh). `to_torch` lives on the top-level `warp` module as of
+warp 1.x (there is no `warp.torch` submodule to import).
 """
 
 from __future__ import annotations
@@ -58,11 +63,11 @@ class CameraRig:
 
     def _attach_annotator(self, render_product):
         try:
-            import warp.torch as warp_torch
+            import warp as wp
 
             annotator = rep.AnnotatorRegistry.get_annotator("rgb", device="cuda")
             annotator.attach(render_product)
-            self._warp_to_torch = warp_torch.to_torch
+            self._warp_to_torch = wp.to_torch
             return annotator
         except Exception:
             logger.warning(
