@@ -9,14 +9,16 @@ from __future__ import annotations
 
 from pick_and_place import compat  # noqa: F401  (import order matters - see module docstring)
 from pick_and_place.controller import MagicAttachPickPlace
+from pick_and_place.external_control import apply_suction_edge
 from pick_and_place.robot_setup import create_pedestal_and_robot
 from pick_and_place.selection import PICK_MAX_REACH_M, rank_pick_zone_hit_paths
 from pick_and_place.ur20 import UR20_PRE_PLACE_JOINT_POSITIONS_AWAY
 
 __all__ = [
-    "MagicAttachPickPlace",
-    "create_pedestal_and_robot",
-    "rank_pick_zone_hit_paths",
     "PICK_MAX_REACH_M",
     "UR20_PRE_PLACE_JOINT_POSITIONS_AWAY",
+    "MagicAttachPickPlace",
+    "apply_suction_edge",
+    "create_pedestal_and_robot",
+    "rank_pick_zone_hit_paths",
 ]

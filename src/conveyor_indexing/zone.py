@@ -66,19 +66,32 @@ class ConveyorZone:
         self.state_machine = ConveyorZoneStateMachine(name=node_path, run_speed_pct=run_speed_pct)
         self.state_machine.start()
 
+        # Per-tick cache: check_occupied(), the hold-zone stop-position check, and
+        # (for pick zones) sim_cell.pick_dispatch.evaluate_pick_station all call
+        # get_occupying_prim_paths() for the same zone within one control tick - up to
+        # 3x the same PhysX overlap_box query per tick without this. Invalidated once
+        # per tick by ConveyorLineController.step(), so the first call each tick still
+        # queries PhysX and every later call that tick reuses its result.
+        self._occupancy_cache: list | None = None
+
+    def invalidate_occupancy_cache(self) -> None:
+        self._occupancy_cache = None
+
     def get_occupying_prim_paths(self) -> list:
         """Return paths of every non-excluded rigid body overlapping this zone.
 
         Used for the boolean occupied check and, for the pick zone, to identify
         WHICH box actually triggered pick_ready rather than a hardcoded path.
         """
-        return overlap_box_prim_paths(
-            self.bbox_half_extent,
-            self.bbox_center,
-            self._quat,
-            self._excluded_roots,
-            zone_name=self.node_path,
-        )
+        if self._occupancy_cache is None:
+            self._occupancy_cache = overlap_box_prim_paths(
+                self.bbox_half_extent,
+                self.bbox_center,
+                self._quat,
+                self._excluded_roots,
+                zone_name=self.node_path,
+            )
+        return self._occupancy_cache
 
     def check_occupied(self) -> bool:
         return len(self.get_occupying_prim_paths()) > 0

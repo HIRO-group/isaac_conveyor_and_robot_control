@@ -194,6 +194,24 @@ class MagicAttachPickPlace:
             self._phase = Phase.STAGE_FOR_PLACE
 
     @property
+    def wrist_link_path(self) -> str:
+        """USD path of the wrist link the box attaches to - see attachment.attach_box.
+        Exposed for CONVEYOR_INDEXING_EXTERNAL_ACTION mode (sim_cell.runner), which
+        drives attach/detach directly instead of through this class's phase machine.
+        """
+        return self._wrist_link_path
+
+    @property
+    def attach_joint_path(self) -> str:
+        """USD path of the (possibly not-yet-created) FixedJoint - see attachment.py."""
+        return self._attach_joint_path
+
+    def tool_world_position(self) -> np.ndarray:
+        """Public wrapper around _tool_world_position(), for external-control-mode
+        proximity checks (see pick_and_place.external_control.apply_suction_edge)."""
+        return self._tool_world_position()
+
+    @property
     def phase_name(self) -> str:
         return self._phase.name
 

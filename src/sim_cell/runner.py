@@ -12,6 +12,7 @@ import numpy as np
 
 from cameras.frame_meta import now_us
 from conveyor_indexing.protos import plc, sim_action
+from pick_and_place import apply_suction_edge
 from sim_cell import layout, settings
 from sim_cell.cell import build_cell
 from sim_cell.debug import dump_tick_debug
@@ -32,6 +33,13 @@ from sim_cell.stage_setup.truck import despawn_boxes_in_truck
 # suction, low byte = cup mask.
 _DIO_HOLDING = 0x10000 | 0xFF
 _DIO_EMPTY = 0
+
+# When set, an external controller (e.g. a trained policy, via
+# sim_cell.external_command_bridge) drives both arms + both conveyors
+# directly instead of the autonomous pick_and_place/conveyor_indexing control
+# - see the top-level README's "Design" section. Mutually exclusive with
+# recording (CONVEYOR_INDEXING_RECORD*) for now - see the checks below.
+EXTERNAL_ACTION_ENV_VAR = "CONVEYOR_INDEXING_EXTERNAL_ACTION"
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +72,21 @@ def run(simulation_app) -> None:
     # CONVEYOR_INDEXING_RECORD_MCAP=1 - see sim_cell.recording). Independent of
     # `recorder` above - either, both, or neither can be enabled.
     mcap_recorder = cell.mcap_recorder
+
+    external_action = os.environ.get(EXTERNAL_ACTION_ENV_VAR) == "1"
+    if external_action and (recorder is not None or mcap_recorder is not None):
+        raise SystemExit(
+            f"{EXTERNAL_ACTION_ENV_VAR}=1 is incompatible with recording (CONVEYOR_INDEXING_RECORD/"
+            "CONVEYOR_INDEXING_RECORD_MCAP) - episode/phase-transition segmentation has no defined "
+            "meaning once an external controller owns the phase machine. Run with recording disabled."
+        )
+    # This arm's currently-held box path (None if not holding) while
+    # external_action is set - MagicAttachPickPlace.holding_box/held_box_path
+    # are frozen (forward() never runs), so external mode tracks its own
+    # equivalent via pick_and_place.apply_suction_edge.
+    held_box_path_1 = None
+    held_box_path_2 = None
+
     camera_role_by_serial = {spec.serial: spec.role for spec in cell.camera_specs}
     box_id_to_variant = {path: variant for variant, paths in cell.pool.paths_by_variant.items() for path in paths}
     active_box_paths: set = set()
@@ -87,6 +110,11 @@ def run(simulation_app) -> None:
         shutdown_requested = True
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    # Only used in external_action mode, to route an externally-commanded
+    # SimConveyorCommand to the zone it names - see the override right after
+    # loop1.step/loop2.step below.
+    zones_by_node_path = {zone.node_path: zone for zone in [*cell.loop1.zones, *cell.loop2.zones]}
 
     world = cell.world
 
@@ -112,8 +140,32 @@ def run(simulation_app) -> None:
 
                 # Pick-and-place runs every physics step for smooth convergence; conveyor
                 # indexing runs at the coarser control rate below.
-                cell.pick_place.forward(pick_ready, pick_box_path)
-                cell.pick_place_2.forward(pick_ready_2, pick_box_path_2)
+                if external_action:
+                    # Drive both arms directly from the latest externally-supplied command,
+                    # bypassing MagicAttachPickPlace's phase state machine entirely (it's
+                    # simply never called in this branch, so it stays dormant - no explicit
+                    # pause needed). set_dof_position_targets is the exact same call
+                    # TrajectoryDriver.drive_to() uses internally; the PD drive holds the
+                    # last-set target for free on ticks where no new command has arrived yet.
+                    cmd_arm1, cmd_arm2, cmd_conveyors = cell.external_command_bridge.latest()
+                    if cmd_arm1 is not None:
+                        cell.robot.set_dof_position_targets(
+                            positions=np.asarray(cmd_arm1.joint_targets, dtype=np.float32)
+                        )
+                        held_box_path_1 = apply_suction_edge(
+                            1, cell.pick_place, cell.box_rigid_prims, cmd_arm1.suction, held_box_path_1, pick_box_path
+                        )
+                    if cmd_arm2 is not None:
+                        cell.robot2.set_dof_position_targets(
+                            positions=np.asarray(cmd_arm2.joint_targets, dtype=np.float32)
+                        )
+                        held_box_path_2 = apply_suction_edge(
+                            2, cell.pick_place_2, cell.box_rigid_prims, cmd_arm2.suction, held_box_path_2,
+                            pick_box_path_2,
+                        )
+                else:
+                    cell.pick_place.forward(pick_ready, pick_box_path)
+                    cell.pick_place_2.forward(pick_ready_2, pick_box_path_2)
 
                 # Every physics step (not just recorded ones) so no WAITING->pick
                 # edge is missed between 30Hz samples.
@@ -156,6 +208,18 @@ def run(simulation_app) -> None:
                                 settings.CAMERA_WIDTH,
                                 settings.CAMERA_HEIGHT,
                             )
+                    # Live arm-state publish, always on (like camera_publisher) regardless of
+                    # control mode. In external_action mode, MagicAttachPickPlace.holding_box is
+                    # frozen (forward() never runs) - held_box_path_1/2 are external mode's own
+                    # equivalent, tracked by apply_suction_edge above.
+                    holding_1 = held_box_path_1 is not None if external_action else cell.pick_place.holding_box
+                    holding_2 = held_box_path_2 is not None if external_action else cell.pick_place_2.holding_box
+                    cell.robot_state_publisher.publish_arm_state(
+                        1, np.degrees(cell.robot.get_dof_positions().numpy()[0]), holding_1
+                    )
+                    cell.robot_state_publisher.publish_arm_state(
+                        2, np.degrees(cell.robot2.get_dof_positions().numpy()[0]), holding_2
+                    )
                     # Images + state sampled in the same iteration = the synchronized
                     # training rows theia's converter expects. Skipped while annotators
                     # are still warming up (partial frames) or before the first control
@@ -198,6 +262,40 @@ def run(simulation_app) -> None:
                     commands_msg = sim_action.SimConveyorCommands()
                     cell.loop1.step(state_msg, commands_msg, box_positions)
                     cell.loop2.step(state_msg, commands_msg, box_positions)
+                    if external_action:
+                        # Let step() run as normal first - it also drives occupancy/PackML
+                        # bookkeeping that evaluate_pick_station() depends on for the arm
+                        # box-lookup above, so skipping it would silently break arm control
+                        # too. Only the belt command it just applied gets overridden here;
+                        # OmniGraph only consumes belt attributes on the next physics
+                        # substep, so this later same-tick override safely wins.
+                        #
+                        # state_msg's items were already populated by step() from its own
+                        # autonomous decision, before this override - re-point Speed at what
+                        # actually got commanded so theia/plc/state_conveyors (the "actual
+                        # state" telemetry an external observer sees) doesn't silently report
+                        # stale autonomous values while external_action owns the real belt.
+                        items_by_name = {item.Name: item for item in state_msg.Conveyors}
+                        _, _, cmd_conveyors = cell.external_command_bridge.latest()
+                        if cmd_conveyors is not None:
+                            for cmd in cmd_conveyors.commands:
+                                zone = zones_by_node_path.get(cmd.conveyor_node_path)
+                                if zone is not None:
+                                    zone.apply_command(cmd.run, cmd.speed)
+                                    item = items_by_name.get(cmd.conveyor_node_path)
+                                    if item is not None:
+                                        item.Speed = cmd.speed if cmd.run else 0
+                        else:
+                            # No external command has ever arrived yet - stop every zone rather
+                            # than leaving step()'s autonomous decision in effect, so external-
+                            # action mode never runs on the autonomous controller's behavior by
+                            # default (see the top-level README's "Design" section).
+                            for zone in zones_by_node_path.values():
+                                zone.apply_command(False, 0)
+                                item = items_by_name.get(zone.node_path)
+                                if item is not None:
+                                    item.Speed = 0
+                    cell.robot_state_publisher.publish_conveyor_state(state_msg)
                     landed_box_paths = despawn_boxes_in_truck(
                         cell.box_rigid_prims,
                         box_positions,
@@ -305,4 +403,7 @@ def run(simulation_app) -> None:
             cell.mcap_recorder.close()
         cell.tick_logger.close()
         cell.camera_publisher.close()
+        cell.robot_state_publisher.close()
+        if cell.external_command_bridge is not None:
+            cell.external_command_bridge.close()
         simulation_app.close()

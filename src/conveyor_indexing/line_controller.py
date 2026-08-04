@@ -61,6 +61,8 @@ class ConveyorLineController:
         `box_positions` is {path: (x, y, z)}, precomputed once per control tick from a
         single batched RigidPrim read (see sim_cell.runner) rather than queried per-box.
         """
+        for zone in self.zones:
+            zone.invalidate_occupancy_cache()
         self.occupied = [zone.check_occupied() for zone in self.zones]
 
         n = len(self.zones)

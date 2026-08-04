@@ -5,6 +5,7 @@ pick-and-place controllers, wired together for `5_conv_env.usd`.
 from __future__ import annotations
 
 import logging
+import os
 import pathlib
 from dataclasses import dataclass
 
@@ -23,8 +24,10 @@ from sim_cell import layout, settings
 from sim_cell.box_spawner import BoxSpawner
 from sim_cell.camera_layout import build_camera_specs
 from sim_cell.camera_tuning import maybe_enable_camera_tuning
+from sim_cell.external_command_bridge import ExternalCommandBridge
 from sim_cell.recording import maybe_build_mcap_recorder, maybe_build_recorder
 from sim_cell.robot_placement import belt_top_z, derive_station_2_geometry
+from sim_cell.robot_state_publisher import RobotStateZenohPublisher
 from sim_cell.stage_setup import StagePrep
 from sim_cell.stage_setup.box_pool import BoxPool
 
@@ -44,6 +47,8 @@ class Cell:
     camera_rig: CameraRig
     camera_specs: list[CameraSpec]
     camera_publisher: CameraZenohPublisher
+    robot_state_publisher: RobotStateZenohPublisher
+    external_command_bridge: ExternalCommandBridge | None
     episode_recorder: EpisodeRecorder | None
     mcap_recorder: McapRecorder | None
     box_rigid_prims: dict
@@ -180,6 +185,13 @@ def build_cell(stage_prep: StagePrep) -> Cell:
     camera_specs = build_camera_specs(loop1, loop2)
     camera_rig = CameraRig(stage, camera_specs)
     camera_publisher = CameraZenohPublisher(build_camera_list(camera_specs))
+    # Always-on, like camera_publisher - lets an external observer watch arm/conveyor
+    # state even while the sim runs autonomously (CONVEYOR_INDEXING_EXTERNAL_ACTION unset).
+    robot_state_publisher = RobotStateZenohPublisher()
+    # Only opened in external-control mode - zero extra Zenoh session otherwise.
+    external_command_bridge = (
+        ExternalCommandBridge() if os.environ.get("CONVEYOR_INDEXING_EXTERNAL_ACTION") == "1" else None
+    )
     maybe_enable_camera_tuning(stage, camera_specs)
     episode_recorder = maybe_build_recorder(camera_specs)
     # spawner.seed is only known after BoxSpawner's own construction above (see
@@ -199,6 +211,8 @@ def build_cell(stage_prep: StagePrep) -> Cell:
         camera_rig=camera_rig,
         camera_specs=camera_specs,
         camera_publisher=camera_publisher,
+        robot_state_publisher=robot_state_publisher,
+        external_command_bridge=external_command_bridge,
         episode_recorder=episode_recorder,
         mcap_recorder=mcap_recorder,
         box_rigid_prims=box_rigid_prims,

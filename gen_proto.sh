@@ -15,6 +15,13 @@
 #   - this directory's sim_state.proto (sim-only ground truth: box
 #     states/events, arm phase transitions, run metadata)
 #
+# Also generated, needed only when CONVEYOR_INDEXING_EXTERNAL_ACTION=1 (see
+# sim_cell.robot_state_publisher / sim_cell.external_command_bridge):
+#   - this directory's sim_robot_state.proto (live per-arm joint/suction
+#     state, wire-compatible with theia's real robot.proto)
+#   - this directory's sim_arm_action.proto (live external per-arm action
+#     command - sim-only, no real-robot equivalent)
+#
 # Usage:
 #   bash /home/ubuntu/conveyor_indexing/gen_proto.sh
 #
@@ -69,6 +76,12 @@ $PROTOC \
   -I "$SIM_PROTO_DIR" \
   --python_out="$PROTO_OUT" \
   "$SIM_PROTO_DIR/sim_state.proto"
+
+$PROTOC \
+  -I "$SIM_PROTO_DIR" \
+  --python_out="$PROTO_OUT" \
+  "$SIM_PROTO_DIR/sim_robot_state.proto" \
+  "$SIM_PROTO_DIR/sim_arm_action.proto"
 
 echo "Proto generated at $PROTO_OUT"
 echo "scripts/run.sh already puts $PROTO_OUT on PYTHONPATH - just run:"
