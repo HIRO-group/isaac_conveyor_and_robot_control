@@ -20,10 +20,19 @@ two channel families:
   Sim-only ground truth (theia.sim.conveyor_indexing.v1, proto/sim_state.proto -
   no theia equivalent; exists so a capture can fully reproduce the run, not
   just what a real robot's sensors would see):
-    BoxStates            sim/boxes/state    120Hz (every currently-active box)
-    BoxEvent              sim/boxes/events   on spawn/despawn
-    ArmPhaseTransition    sim/arms/phase     on phase edge
-    RunMetadata           sim/run_metadata   once, and again on every rotation
+    BoxStates            sim/boxes/state          120Hz (every currently-active box)
+    BoxEvent              sim/boxes/events         on spawn/despawn
+    ArmPhaseTransition    sim/arms/phase           on phase edge (skipped in external-action
+                                                    mode - see sim_cell.runner - the phase
+                                                    state machine is dormant there)
+    ArmToolPose           sim/arm/<n>/tool_pose    120Hz/arm, both control modes
+    RunMetadata           sim/run_metadata         once, and again on every rotation
+
+  On-policy action log (CONVEYOR_INDEXING_EXTERNAL_ACTION=1 only - the sim's
+  own equivalent of theia's real commanded-action log, for eval/DAgger; see
+  sim_cell.external_command_bridge for the live Zenoh topics these mirror):
+    SimArmActionCommand    sim/arm/<n>/action_command   on apply, per arm
+    SimConveyorCommands    sim/conveyor/command         on apply, once/control-tick
 
 MoveTarget is a real per-move message on theia's robot service, but this
 sim's cuMotion planner has no equivalent per-tick "target" to mirror - it
@@ -49,6 +58,7 @@ actually runs.
 
 from __future__ import annotations
 
+import json
 import logging
 import pathlib
 import queue
@@ -65,12 +75,13 @@ except ImportError as exc:  # pragma: no cover - environment dependent
         "  /home/ubuntu/IsaacSim/python.sh -m pip install mcap mcap-protobuf-support\n"
     ) from exc
 
-from google.protobuf.timestamp_pb2 import Timestamp
-
+import sim_arm_action_pb2
 import sim_state_pb2
-from conveyor_indexing.protos import plc
 from foxglove import raw_image_pb2
+from google.protobuf.timestamp_pb2 import Timestamp
 from robot import robot_pb2
+
+from conveyor_indexing.protos import plc, sim_action
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +214,50 @@ class McapRecorder:
         )
         self._enqueue("sim/arms/phase", msg, sim_time_s)
 
+    def record_tool_pose(self, arm: int, sim_time_s: float, position: tuple, orientation_wxyz: tuple) -> None:
+        """Arm `arm`'s tool-frame (wrist_3_link/flange) world pose this
+        control tick - see pick_and_place.controller.MagicAttachPickPlace.
+        tool_world_pose(). Independent of control mode (unlike
+        holding_box/held_box_path, this GeomPrim read stays live whether or
+        not the phase state machine is running), recorded at the same 120Hz
+        cadence as BoxStates/PositionStatus so forward kinematics is never
+        needed downstream to reconstruct tool position for the 0.35m
+        proximity-based error detectors.
+        """
+        msg = sim_state_pb2.ArmToolPose(
+            sim_time_s=sim_time_s,
+            arm=arm,
+            position=sim_state_pb2.Vec3(x=float(position[0]), y=float(position[1]), z=float(position[2])),
+            orientation=sim_state_pb2.Quat(
+                w=float(orientation_wxyz[0]),
+                x=float(orientation_wxyz[1]),
+                y=float(orientation_wxyz[2]),
+                z=float(orientation_wxyz[3]),
+            ),
+        )
+        self._enqueue(f"sim/arm/{arm}/tool_pose", msg, sim_time_s)
+
+    def record_arm_action_command(self, arm: int, sim_time_s: float, cmd: sim_arm_action_pb2.SimArmActionCommand) -> None:
+        """The externally-supplied per-tick arm command actually applied this
+        physics step (CONVEYOR_INDEXING_EXTERNAL_ACTION=1 only - see
+        sim_cell.runner / sim_cell.external_command_bridge): the on-policy
+        action log needed for eval + DAgger. `cmd` is the exact message
+        applied this tick (carries its own sender-assigned monotonic `seq`
+        field verbatim, since the whole message is recorded); `sim_time_s` is
+        when it was actually applied to the sim, not when it was received off
+        Zenoh - same convention as every other record_* method here.
+        """
+        self._enqueue(f"sim/arm/{arm}/action_command", cmd, sim_time_s)
+
+    def record_conveyor_command(self, sim_time_s: float, cmd: sim_action.SimConveyorCommands) -> None:
+        """The externally-supplied conveyor command actually applied this
+        control tick (CONVEYOR_INDEXING_EXTERNAL_ACTION=1 only) - same
+        on-policy action log rationale as record_arm_action_command.
+        SimConveyorCommand carries no per-message seq (unlike
+        SimArmActionCommand) - only sim_time_s orders these on replay.
+        """
+        self._enqueue("sim/conveyor/command", cmd, sim_time_s)
+
     def write_move_target_stub(self, arm: int) -> None:
         """One placeholder MoveTarget per arm - see the module docstring for
         why this is structural (satisfies mcap_to_lerobot.py's replay gate)
@@ -289,3 +344,28 @@ class McapRecorder:
             logger.warning(
                 "mcap recorder dropped %d message(s) - this capture has time gaps", self._dropped
             )
+        self._persist_stats()
+
+    def _persist_stats(self) -> None:
+        """Write final message/drop counts to a small sidecar JSON in
+        output_dir, next to the mcap files themselves - process log output
+        alone doesn't reliably survive an unattended multi-hour collection
+        run (see scripts/collect_local.py), the way a file under output_dir
+        does (collect_local.py already streams that whole directory to GCS).
+        Eval's QA gate (recording-integrity checks) can read this directly
+        instead of re-deriving a drop count from mcap gaps.
+        """
+        stats_path = self.output_dir / "recorder_stats.json"
+        try:
+            stats_path.write_text(
+                json.dumps(
+                    {
+                        "messages_written": self._messages_written,
+                        "dropped": self._dropped,
+                        "run_epoch_ns": self._run_epoch_ns,
+                    },
+                    indent=2,
+                )
+            )
+        except OSError:
+            logger.warning("could not write recorder_stats.json to %s", self.output_dir, exc_info=True)

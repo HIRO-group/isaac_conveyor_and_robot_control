@@ -10,6 +10,31 @@ requires-python = ">=3.10"
 # (mypy/ruff below), so `src` is a real Python package layout for editors and
 # linters without requiring a packaging step to run the sim.
 
+# Only the modules that avoid isaacsim/omni/carb imports (see each package's
+# own docstring) are pytest-able outside Isaac Sim - see tests/conftest.py.
+# Install with the interpreter you'll run `pytest` from (not Isaac Sim's
+# bundled python.sh - these deps are for local/CI test runs only):
+#   pip install pytest numpy protobuf mcap mcap-protobuf-support pyarrow \
+#     eclipse-zenoh usd-core grpcio-tools
+# grpcio-tools is only needed to regenerate bindings (bash gen_proto.sh);
+# usd-core (PyPI's redistributable core USD, unrelated to Isaac Sim) backs
+# the handful of tests that build a real in-memory USD stage instead of a
+# fake/duck-typed one.
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "numpy",
+    "protobuf",
+    "mcap",
+    "mcap-protobuf-support",
+    "pyarrow",
+    "eclipse-zenoh",
+    "usd-core",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.mypy]
 mypy_path = "src"
 namespace_packages = true

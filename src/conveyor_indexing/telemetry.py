@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from conveyor_indexing.protos import common_types, plc
-from conveyor_indexing.state_machine import ZoneCommand, ZoneObservation
+from conveyor_indexing.state_machine import DIRECTION_UNDEFINED, ZoneCommand, ZoneObservation
 
 Machine = plc.ConveyorStateMachineCode
 
@@ -41,3 +41,22 @@ def append_conveyor_command(commands_msg, zone, command: ZoneCommand) -> None:
     cmd.run = command.run
     cmd.speed = command.speed_pct
     cmd.direction = command.direction
+
+
+def resolve_override_speed_direction(run: bool, speed: int, direction: int) -> tuple[int, int]:
+    """What Speed/Direction an externally-commanded conveyor override
+    (CONVEYOR_INDEXING_EXTERNAL_ACTION=1 - see sim_cell.runner) should
+    reflect back into a StateConveyors_ConveyorsItem already appended by
+    append_conveyor_state for this zone/tick.
+
+    sim_cell.runner's override loop re-points Speed at what actually got
+    commanded so theia/plc/state_conveyors doesn't silently report the
+    autonomous state machine's stale decision once an external command owns
+    the real belt - but was missing the same reflection for Direction. This
+    mirrors append_conveyor_state's own field semantics: not running has no
+    meaningful direction, hence DIRECTION_UNDEFINED (matching the "stop every
+    zone" fallback's Speed=0 when no external command has ever arrived).
+    """
+    if not run:
+        return 0, DIRECTION_UNDEFINED
+    return speed, direction

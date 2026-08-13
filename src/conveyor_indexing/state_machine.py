@@ -49,6 +49,18 @@ DIRECTION_REVERSE = 2
 # sim; tune once real handshake timing is known.
 INDUCT_HANDSHAKE_TICKS = 1
 
+# Fraction of a hold zone's length (0=upstream/entry edge, 1=downstream/exit
+# edge) a leading box must cross before the zone reports IDLE - see
+# conveyor_indexing.line_controller.ConveyorLineController.step's
+# at_stop_position gate and conveyor_indexing.zone.ConveyorZone.is_past_center.
+# Previously spelled `0.8 if is_last else 0.8` at the line_controller call
+# site - both branches always evaluated to the same value (dead code, since
+# no case has ever given the line's last zone a distinct stop point);
+# collapsed to this one named constant. If the last zone's open-ground stop
+# point ever needs to differ, give it its own distinct constant instead of
+# reintroducing a no-op conditional.
+HOLD_ZONE_STOP_FRACTION = 0.8
+
 
 @dataclass
 class ZoneCommand:

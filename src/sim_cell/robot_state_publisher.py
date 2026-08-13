@@ -60,7 +60,7 @@ class RobotStateZenohPublisher:
         self._conveyor_publisher = self._session.declare_publisher(self.CONVEYOR_TOPIC)
         logger.info("robot-state publishers ready: %s, %s", list(self.ARM_TOPICS.values()), self.CONVEYOR_TOPIC)
 
-    def publish_arm_state(self, arm: int, joint_degrees, holding: bool) -> None:
+    def publish_arm_state(self, arm: int, joint_degrees, holding: bool, capture_ts_us: int) -> None:
         publisher = self._arm_publishers.get(arm)
         if publisher is None:
             logger.warning("publish_arm_state called for unknown arm %s", arm)
@@ -68,6 +68,11 @@ class RobotStateZenohPublisher:
         msg = robot_state.PositionStatus(
             joint_degrees=[float(v) for v in joint_degrees],
             dio_blocks=[_DIO_HOLDING if holding else _DIO_EMPTY],
+            # Same synchronized capture instant this tick's camera frames carry
+            # (see cameras.frame_meta.now_us / sim_cell.runner's capture_ts_us) -
+            # an external observer can align this arm-state sample with the
+            # camera frames published the same tick without a separate clock.
+            recv_timestamp_us=capture_ts_us,
         )
         publisher.put(msg.SerializeToString())
 

@@ -8,6 +8,7 @@ from pxr import Usd
 
 from conveyor_indexing.directions import fix_zone_directions
 from conveyor_indexing.occupancy import leading_occupant_path
+from conveyor_indexing.state_machine import HOLD_ZONE_STOP_FRACTION
 from conveyor_indexing.telemetry import append_conveyor_command, append_conveyor_state
 from conveyor_indexing.zone import ConveyorZone
 
@@ -99,9 +100,9 @@ class ConveyorLineController:
                     zone.world_travel_direction, occupying_paths, box_positions, zone_name=zone.node_path
                 )
                 if leading_path is not None:
-                    # is_last has open ground past it, not another zone - tuned separately.
-                    stop_fraction = 0.8 if is_last else 0.8
-                    at_stop_position = zone.is_past_center(box_positions[leading_path], stop_fraction=stop_fraction)
+                    at_stop_position = zone.is_past_center(
+                        box_positions[leading_path], stop_fraction=HOLD_ZONE_STOP_FRACTION
+                    )
 
             observation, command = zone.state_machine.step(
                 occupied=self.occupied[i],

@@ -12,24 +12,26 @@ from dataclasses import dataclass
 from isaacsim.core.api import World
 from isaacsim.core.experimental.prims import Articulation, RigidPrim
 
-from cameras.rig import CameraRig
+from cameras.rig import HORIZONTAL_APERTURE_MM, CameraRig
 from cameras.specs import CameraSpec, build_camera_list
 from cameras.zenoh_publisher import CameraZenohPublisher
 from conveyor_indexing.episode_recorder import EpisodeRecorder
 from conveyor_indexing.line_controller import ConveyorLineController
 from conveyor_indexing.mcap_recorder import McapRecorder
 from conveyor_indexing.parquet_logger import ConveyorIndexingLogger
+from conveyor_indexing.zone import ZONE_RUN_VELOCITY
 from pick_and_place import UR20_PRE_PLACE_JOINT_POSITIONS_AWAY, MagicAttachPickPlace, create_pedestal_and_robot
+from pick_and_place.phases import ATTACH_MAX_DISTANCE
 from sim_cell import layout, settings
 from sim_cell.box_spawner import BoxSpawner
 from sim_cell.camera_layout import build_camera_specs
 from sim_cell.camera_tuning import maybe_enable_camera_tuning
 from sim_cell.external_command_bridge import ExternalCommandBridge
-from sim_cell.recording import maybe_build_mcap_recorder, maybe_build_recorder
-from sim_cell.robot_placement import belt_top_z, derive_station_2_geometry
+from sim_cell.recording import PoolVariantInput, RunMetadataExtras, maybe_build_mcap_recorder, maybe_build_recorder
+from sim_cell.robot_placement import belt_top_z, derive_station_2_geometry, zone_geometry_inputs
 from sim_cell.robot_state_publisher import RobotStateZenohPublisher
 from sim_cell.stage_setup import StagePrep
-from sim_cell.stage_setup.box_pool import BoxPool
+from sim_cell.stage_setup.box_pool import POOL_VARIANT_URLS, BoxPool
 
 logger = logging.getLogger(__name__)
 
@@ -194,10 +196,59 @@ def build_cell(stage_prep: StagePrep) -> Cell:
     )
     maybe_enable_camera_tuning(stage, camera_specs)
     episode_recorder = maybe_build_recorder(camera_specs)
+
+    # One read per robot, reused by both the transform below and (already
+    # read once, separately, earlier for debug logging - see the
+    # check_pos/robot dof_positions logger.debug calls above) - not otherwise
+    # cached, but cheap (a 7-float device->host copy) and only paid once here.
+    robot_1_pos, robot_1_orient = robot.get_world_poses()
+    robot_2_pos, robot_2_orient = robot2.get_world_poses()
+
+    # RunMetadata's P4 geometry/config additions (see sim_cell.recording.
+    # RunMetadataExtras) - built unconditionally (cheap: a handful of already-
+    # computed zone/robot/pool reads) so maybe_build_mcap_recorder doesn't need
+    # a separate Isaac-touching code path depending on whether recording is on.
+    run_metadata_extras = RunMetadataExtras(
+        zone_geometry=(
+            zone_geometry_inputs(
+                loop1.zones, ZONE_RUN_VELOCITY * settings.LOOP1_RUN_SPEED_PCT / 100.0, 1,
+                frozenset({layout.PICK_ZONE_INDEX, layout.PICK_ZONE_INDEX_2}),
+            )
+            + zone_geometry_inputs(
+                loop2.zones, ZONE_RUN_VELOCITY * settings.LOOP2_RUN_SPEED_PCT / 100.0, 2,
+                frozenset({layout.PLACE_ZONE_INDEX, layout.PLACE_ZONE_INDEX_2}),
+            )
+        ),
+        truck_bed_min=tuple(float(v) for v in stage_prep.truck_bed_min),
+        truck_bed_max=tuple(float(v) for v in stage_prep.truck_bed_max),
+        # Read from the live Articulation for both robots, not
+        # sim_cell.settings.ROBOT_POSITION - robot 2's is runtime-derived (see
+        # derive_station_2_geometry above), so only the live pose is correct
+        # for both; robot 1's happens to also match its settings constant.
+        robot_1_transform=(
+            tuple(float(v) for v in robot_1_pos.numpy()[0]),
+            tuple(float(v) for v in robot_1_orient.numpy()[0]),
+        ),
+        robot_2_transform=(
+            tuple(float(v) for v in robot_2_pos.numpy()[0]),
+            tuple(float(v) for v in robot_2_orient.numpy()[0]),
+        ),
+        attach_max_distance_m=ATTACH_MAX_DISTANCE,
+        pool_variants=[
+            PoolVariantInput(
+                variant=variant,
+                asset_url=POOL_VARIANT_URLS[variant],
+                count=len(paths),
+                half_extent=tuple(float(v) for v in stage_prep.pool.half_extents_by_variant[variant]),
+            )
+            for variant, paths in stage_prep.pool.paths_by_variant.items()
+        ],
+        camera_horizontal_aperture_mm=HORIZONTAL_APERTURE_MM,
+    )
     # spawner.seed is only known after BoxSpawner's own construction above (see
     # its __init__) - RunMetadata needs the real seed, not the env var, since
     # an unset CONVEYOR_INDEXING_SPAWN_SEED gets a fresh random one each run.
-    mcap_recorder = maybe_build_mcap_recorder(camera_specs, spawner.seed)
+    mcap_recorder = maybe_build_mcap_recorder(camera_specs, spawner.seed, run_metadata_extras)
 
     return Cell(
         world=world,

@@ -211,6 +211,19 @@ class MagicAttachPickPlace:
         proximity checks (see pick_and_place.external_control.apply_suction_edge)."""
         return self._tool_world_position()
 
+    def tool_world_pose(self) -> tuple[np.ndarray, np.ndarray]:
+        """(position, orientation_wxyz) of the tool frame in world space -
+        the position-and-orientation counterpart of tool_world_position().
+        Used by ground-truth recording (conveyor_indexing.mcap_recorder's
+        sim/arm/{n}/tool_pose channel) - independent of the phase state
+        machine (this GeomPrim tracks the arm's actual physical
+        wrist_3_link/flange, so it stays live in
+        CONVEYOR_INDEXING_EXTERNAL_ACTION mode too, unlike
+        holding_box/held_box_path above).
+        """
+        positions, orientations = self._tool_prim.get_world_poses()
+        return positions.numpy()[0], orientations.numpy()[0]
+
     @property
     def phase_name(self) -> str:
         return self._phase.name
