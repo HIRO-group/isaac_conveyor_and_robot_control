@@ -46,6 +46,17 @@ _DIO_EMPTY = 0
 # is allowed at the same time (needed for on-policy eval recording).
 EXTERNAL_ACTION_ENV_VAR = "CONVEYOR_INDEXING_EXTERNAL_ACTION"
 
+# Opt-out for camera frames specifically within CONVEYOR_INDEXING_RECORD_MCAP
+# (default "1" - on, matching prior behavior; this is additive, nothing else
+# changes unless set to "0"). record_camera_frame and record_position_status/
+# etc. share the same EpisodeRecorder's bounded queue (mcap_recorder.py); 6
+# cameras at 30Hz of full RGB frames can fill that queue faster than the
+# writer thread drains it, and once full, every subsequent enqueue - including
+# position_status - silently drops too. Confirmed against a real run where
+# recording stopped entirely, for a task that only needs position_status,
+# not camera frames.
+RECORD_MCAP_CAMERAS_ENV_VAR = "CONVEYOR_INDEXING_RECORD_MCAP_CAMERAS"
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,6 +88,7 @@ def run(simulation_app) -> None:
     # CONVEYOR_INDEXING_RECORD_MCAP=1 - see sim_cell.recording). Independent of
     # `recorder` above - either, both, or neither can be enabled.
     mcap_recorder = cell.mcap_recorder
+    record_mcap_cameras = os.environ.get(RECORD_MCAP_CAMERAS_ENV_VAR, "1") == "1"
 
     external_action = os.environ.get(EXTERNAL_ACTION_ENV_VAR) == "1"
     # CONVEYOR_INDEXING_RECORD (30Hz episode/parquet recorder) still conflicts -
@@ -232,7 +244,7 @@ def run(simulation_app) -> None:
                     frames = cell.camera_rig.capture_all()
                     for serial, rgb_bytes in frames.items():
                         cell.camera_publisher.publish_frame(serial, rgb_bytes, capture_ts_us)
-                        if mcap_recorder is not None:
+                        if mcap_recorder is not None and record_mcap_cameras:
                             mcap_recorder.record_camera_frame(
                                 serial,
                                 camera_role_by_serial[serial],
