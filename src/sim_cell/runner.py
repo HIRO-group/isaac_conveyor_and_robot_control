@@ -93,6 +93,24 @@ def run(simulation_app) -> None:
     held_box_path_1 = None
     held_box_path_2 = None
 
+    if external_action:
+        # cell.py registers each hold zone's overflow-readiness check against
+        # pick_place.phase_name == "WAITING" (see build_cell) - correct for the
+        # autonomous controller, but phase_name is frozen at its WAITING default
+        # here (forward() is never called in this branch, same reason
+        # holding_box is frozen above), so that check is permanently True. A
+        # permanently-True "robot ready" means the zone permanently treats
+        # itself as holding for this arm and NEVER overflows a box to the next
+        # station's zone downstream, regardless of real activity - confirmed
+        # against a real 270s recording where a box settled at the hold zone's
+        # stop point and never advanced. Re-register both hold zones' checks
+        # against the same live held_box_path_N signal already used for
+        # holding_1/holding_2 above, so "ready" correctly means "not currently
+        # holding a box" instead of an autonomous state that never updates.
+        arm_holding_externally = {1: False, 2: False}
+        cell.loop1.set_hold_zone_ready_check(layout.PICK_ZONE_INDEX, lambda: not arm_holding_externally[1])
+        cell.loop1.set_hold_zone_ready_check(layout.PICK_ZONE_INDEX_2, lambda: not arm_holding_externally[2])
+
     camera_role_by_serial = {spec.serial: spec.role for spec in cell.camera_specs}
     box_id_to_variant = {path: variant for variant, paths in cell.pool.paths_by_variant.items() for path in paths}
     active_box_paths: set = set()
@@ -161,6 +179,7 @@ def run(simulation_app) -> None:
                         held_box_path_1 = apply_suction_edge(
                             1, cell.pick_place, cell.box_rigid_prims, cmd_arm1.suction, held_box_path_1, pick_box_path
                         )
+                        arm_holding_externally[1] = held_box_path_1 is not None
                         if mcap_recorder is not None:
                             mcap_recorder.record_arm_action_command(1, sim_time, cmd_arm1)
                     if cmd_arm2 is not None:
@@ -171,6 +190,7 @@ def run(simulation_app) -> None:
                             2, cell.pick_place_2, cell.box_rigid_prims, cmd_arm2.suction, held_box_path_2,
                             pick_box_path_2,
                         )
+                        arm_holding_externally[2] = held_box_path_2 is not None
                         if mcap_recorder is not None:
                             mcap_recorder.record_arm_action_command(2, sim_time, cmd_arm2)
                 else:
