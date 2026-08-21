@@ -20,16 +20,33 @@ directory's README for why) - it's a standalone parquet file, schema-
 compatible with production so it can be merged with real collected data
 later, or replayed through the same tooling (test_collected_data_parquet.py)
 once plc_connector_pb2 bindings are on PYTHONPATH.
+
+Queue is bounded and instrumented the same way conveyor_indexing.mcap_recorder.
+McapRecorder already is (drop-and-warn on overflow, persisted close-time
+stats) - this logger previously used an UNBOUNDED queue.Queue() with a plain
+blocking put() and zero drop/backpressure signal of any kind, unlike every
+other writer thread in this package. That couldn't itself stall the sim's
+main thread (an unbounded put() never blocks the caller), but it was a real,
+silent-growth risk with no way to see it happening - this fix closes that gap
+and gives a capability-diffusion real-collection smoke test a concrete
+queue_depth()/dropped-count signal to watch, whatever turns out to actually
+cause the still-unexplained ~195s recording stall.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import pathlib
 import queue
 import threading
 import time
 import uuid
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+_DROP_WARNING_INTERVAL_S = 1.0
 
 try:
     import pyarrow as pa
@@ -51,6 +68,7 @@ class ConveyorIndexingLogger:
         output_path: str,
         batch_size: int = 100,
         compression: Optional[str] = "zstd",
+        queue_maxsize: int = 2000,
     ) -> None:
         self.output_file = self._resolve_parquet_path(output_path)
         self.output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -67,9 +85,18 @@ class ConveyorIndexingLogger:
             ]
         )
 
-        self._queue: "queue.Queue" = queue.Queue()
+        self._rows_logged = 0
+        self._dropped = 0
+        self._last_drop_warning = 0.0
+
+        self._queue: "queue.Queue" = queue.Queue(maxsize=queue_maxsize)
         self._thread = threading.Thread(target=self._writer_loop, daemon=True, name="conveyor-indexing-writer")
         self._thread.start()
+
+    def queue_depth(self) -> int:
+        """Current backlog size - a smoke test's most direct signal for
+        whether this writer is falling behind (see module docstring)."""
+        return self._queue.qsize()
 
     @staticmethod
     def _resolve_parquet_path(output_path: str) -> pathlib.Path:
@@ -90,15 +117,28 @@ class ConveyorIndexingLogger:
         plc_state_conveyors: bytes,
         conveyor_commands: bytes,
     ) -> None:
-        """Queue one control-tick row for background serialization/writing."""
-        self._queue.put(
-            {
-                "tick": tick,
-                "sim_time_s": sim_time_s,
-                "plc_state_conveyors": plc_state_conveyors,
-                "conveyor_commands": conveyor_commands,
-            }
-        )
+        """Queue one control-tick row for background serialization/writing -
+        never blocks the sim loop (put_nowait; drop-and-warn on overflow,
+        same contract as conveyor_indexing.mcap_recorder.McapRecorder)."""
+        try:
+            self._queue.put_nowait(
+                {
+                    "tick": tick,
+                    "sim_time_s": sim_time_s,
+                    "plc_state_conveyors": plc_state_conveyors,
+                    "conveyor_commands": conveyor_commands,
+                }
+            )
+        except queue.Full:
+            self._dropped += 1
+            now = time.monotonic()
+            if now - self._last_drop_warning >= _DROP_WARNING_INTERVAL_S:
+                logger.warning(
+                    "conveyor indexing tick logger queue full - dropped %d row(s) so far; "
+                    "disk cannot keep up with the logging rate",
+                    self._dropped,
+                )
+                self._last_drop_warning = now
 
     def _writer_loop(self) -> None:
         pending = []
@@ -136,6 +176,7 @@ class ConveyorIndexingLogger:
                 compression=self.compression,
             )
         self._writer.write_table(table)
+        self._rows_logged += len(rows)
 
     def close(self) -> None:
         self._queue.put(self._SENTINEL)
@@ -143,3 +184,25 @@ class ConveyorIndexingLogger:
         if self._writer is not None:
             self._writer.close()
             self._writer = None
+        logger.info(
+            "conveyor indexing tick logger closed: %d row(s) written to %s, %d dropped",
+            self._rows_logged,
+            self.output_file,
+            self._dropped,
+        )
+        if self._dropped:
+            logger.warning(
+                "conveyor indexing tick logger dropped %d row(s) - this capture has gaps", self._dropped
+            )
+        self._persist_stats()
+
+    def _persist_stats(self) -> None:
+        """Mirrors McapRecorder._persist_stats: a sidecar JSON survives an
+        unattended run even if process log output doesn't."""
+        stats_path = self.output_file.with_suffix(".stats.json")
+        try:
+            stats_path.write_text(
+                json.dumps({"rows_logged": self._rows_logged, "dropped": self._dropped}, indent=2)
+            )
+        except OSError:
+            logger.warning("could not write tick logger stats to %s", stats_path, exc_info=True)
