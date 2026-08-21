@@ -8,6 +8,21 @@ Only ever keeps the most recently received message per topic (never a
 backlog - only the newest command ever matters for a PD-drive-style control
 loop), guarded by one lock since Zenoh delivers subscriber callbacks off the
 main sim-loop thread.
+
+Arm commands are additionally guarded against out-of-order delivery by
+`SimArmActionCommand.seq` (a monotonic counter the publishing controller
+assigns) - real, confirmed bug, not hypothetical: this mode's Zenoh session
+opens peer-to-peer (no ZENOH_ROUTER configured in capability-diffusion's real
+collection runs), and under sustained real load a peer-to-peer transport can
+deliver a message late/out of order. Without this guard, "keep only latest"
+would briefly re-adopt a stale command whenever that happens, which then gets
+faithfully re-recorded under its own (already-superseded) seq value - found
+by direct inspection of a real collection's raw MCAP data: one seq value
+recorded as 4 separate, non-adjacent bursts up to ~481s apart within one
+~10-minute session. A downstream seq-based window-resolution fix
+(capability-diffusion's `mcap_convert.seq_range_log_times`) bounds the
+search window as a second line of defense, but rejecting the stale sample
+here stops the bad data from being recorded in the first place.
 """
 
 from __future__ import annotations
@@ -79,6 +94,17 @@ class ExternalCommandBridge:
             msg = arm_action.SimArmActionCommand()
             msg.ParseFromString(_payload_bytes(sample))
             with self._lock:
+                current = self._latest_arm[arm]
+                # Reject a message whose seq isn't strictly newer than what's
+                # already cached - see module docstring. `current is None` is
+                # this arm's first-ever message, always accepted.
+                if current is not None and msg.seq <= current.seq:
+                    logger.warning(
+                        "arm %d: dropping out-of-order/duplicate command (seq=%d, current latest seq=%d) - "
+                        "see module docstring's Zenoh peer-to-peer reordering note",
+                        arm, msg.seq, current.seq,
+                    )
+                    return
                 self._latest_arm[arm] = msg
 
         return _on_sample
