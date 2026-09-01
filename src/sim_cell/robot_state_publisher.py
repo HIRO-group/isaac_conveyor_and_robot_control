@@ -12,7 +12,7 @@ import os
 from typing import ClassVar
 
 from conveyor_indexing.protos import plc
-from sim_cell.protos import robot_state
+from sim_cell.protos import robot_state, sim_state
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +53,21 @@ class RobotStateZenohPublisher:
 
     ARM_TOPICS: ClassVar[dict] = {1: "theia/robot/arm1/position_status", 2: "theia/robot/arm2/position_status"}
     CONVEYOR_TOPIC = "theia/plc/state_conveyors"
+    # `sim/` prefix, not `theia/` - matches sim/conveyor/command and
+    # sim/arm/<n>/action_command's convention for sim-only channels with no
+    # production equivalent (BoxState/BoxStates are sim ground truth, not
+    # something a real cell's PLC would ever report).
+    BOX_STATE_TOPIC = "sim/box_states"
 
     def __init__(self) -> None:
         self._session = _open_session()
         self._arm_publishers = {arm: self._session.declare_publisher(topic) for arm, topic in self.ARM_TOPICS.items()}
         self._conveyor_publisher = self._session.declare_publisher(self.CONVEYOR_TOPIC)
-        logger.info("robot-state publishers ready: %s, %s", list(self.ARM_TOPICS.values()), self.CONVEYOR_TOPIC)
+        self._box_state_publisher = self._session.declare_publisher(self.BOX_STATE_TOPIC)
+        logger.info(
+            "robot-state publishers ready: %s, %s, %s",
+            list(self.ARM_TOPICS.values()), self.CONVEYOR_TOPIC, self.BOX_STATE_TOPIC,
+        )
 
     def publish_arm_state(self, arm: int, joint_degrees, holding: bool, capture_ts_us: int) -> None:
         publisher = self._arm_publishers.get(arm)
@@ -79,9 +88,22 @@ class RobotStateZenohPublisher:
     def publish_conveyor_state(self, state_msg: plc.StateConveyors) -> None:
         self._conveyor_publisher.put(state_msg.SerializeToString())
 
+    def publish_box_states(self, sim_time_s: float, boxes: list) -> None:
+        """`boxes`: list of `sim_state_pb2.BoxState`, e.g. from
+        `sim_cell.recording.build_box_states` - live counterpart of what
+        `conveyor_indexing.mcap_recorder.record_box_states` already writes
+        to MCAP (see Stage 5b, docs/progress-tracker.md), so an external
+        controller can react to real box position/hold state the same way
+        it already can for arm/conveyor state, without needing camera
+        perception.
+        """
+        msg = sim_state.BoxStates(sim_time_s=sim_time_s, boxes=boxes)
+        self._box_state_publisher.put(msg.SerializeToString())
+
     def close(self) -> None:
         for publisher in self._arm_publishers.values():
             publisher.undeclare()
         self._conveyor_publisher.undeclare()
+        self._box_state_publisher.undeclare()
         self._session.close()
         logger.info("robot-state Zenoh session closed")

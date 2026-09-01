@@ -9,5 +9,6 @@ from __future__ import annotations
 
 import sim_arm_action_pb2 as arm_action
 import sim_robot_state_pb2 as robot_state
+import sim_state_pb2 as sim_state
 
-__all__ = ["arm_action", "robot_state"]
+__all__ = ["arm_action", "robot_state", "sim_state"]

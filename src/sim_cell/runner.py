@@ -290,16 +290,20 @@ def run(simulation_app) -> None:
                     # ConveyorLineController.step, despawn_boxes_in_truck, and
                     # evaluate_pick_station - instead of each of them calling
                     # get_world_poses() per box (a GPU sync + host copy every time).
-                    # orientations previously discarded here - kept (at no extra GPU
-                    # sync cost, it's the same batched call) for ground-truth box
-                    # recording below.
                     positions, orientations = cell.box_positions_view.get_world_poses()
                     box_positions = dict(zip(cell.box_paths_ordered, positions.numpy()))
-                    box_orientations = None
-                    box_linear_vel = None
-                    box_angular_vel = None
+                    # orientations dict-ified unconditionally (Stage 5b, docs/progress-
+                    # tracker.md) - free, it's the same batched get_world_poses() call above
+                    # regardless of recording mode, and the live box-state publish below
+                    # needs it too, not just MCAP.
+                    box_orientations = dict(zip(cell.box_paths_ordered, orientations.numpy()))
+                    box_linear_vel = {}
+                    box_angular_vel = {}
                     if mcap_recorder is not None:
-                        box_orientations = dict(zip(cell.box_paths_ordered, orientations.numpy()))
+                        # Velocity needs its own PhysX sync (get_velocities()) - a real added
+                        # cost only MCAP recording pays; a live-only box-state publish doesn't
+                        # need velocity (build_box_states' own .get(path, _ZERO_VEC) fallback
+                        # covers the empty-dict case for a non-MCAP run).
                         linear_vel, angular_vel = cell.box_positions_view.get_velocities()
                         box_linear_vel = dict(zip(cell.box_paths_ordered, linear_vel.numpy()))
                         box_angular_vel = dict(zip(cell.box_paths_ordered, angular_vel.numpy()))
@@ -353,8 +357,8 @@ def run(simulation_app) -> None:
                         cell.truck_bed_min,
                         cell.truck_bed_max,
                     )
-                    if mcap_recorder is not None:
-                        for path in landed_box_paths:
+                    for path in landed_box_paths:
+                        if mcap_recorder is not None:
                             mcap_recorder.record_box_event(
                                 sim_time,
                                 BOX_EVENT_DESPAWNED,
@@ -363,46 +367,62 @@ def run(simulation_app) -> None:
                                 tuple(box_positions[path]),
                                 tuple(box_orientations[path]),
                             )
-                            active_box_paths.discard(path)
+                        active_box_paths.discard(path)
                     # Recycle truck-landed boxes back into the pool, then spawn a new
                     # wave if ConveyorTrack (loop1 zone 0) just emptied out - reuses
                     # the occupancy loop1.step already computed this tick.
                     cell.spawner.release(landed_box_paths)
                     spawned = cell.spawner.update(sim_time, cell.loop1.occupied[0])
-                    if mcap_recorder is not None:
-                        for path, variant, position, quat_wxyz in spawned:
+                    for path, variant, position, quat_wxyz in spawned:
+                        if mcap_recorder is not None:
                             mcap_recorder.record_box_event(
                                 sim_time, BOX_EVENT_SPAWNED, path, variant, position, quat_wxyz
                             )
-                            active_box_paths.add(path)
-                            # box_positions/box_orientations were read at the top of this
-                            # tick, before this box was teleported onto the belt just now -
-                            # without this override, this tick's BoxStates would show the
-                            # box at its stale parked pose (POOL_PARK_ORIGIN). Zero velocity
-                            # is a reasonable approximation for "just placed, not yet fallen".
-                            box_positions[path] = position
-                            box_orientations[path] = quat_wxyz
-                            box_linear_vel[path] = (0.0, 0.0, 0.0)
-                            box_angular_vel[path] = (0.0, 0.0, 0.0)
+                        active_box_paths.add(path)
+                        # box_positions/box_orientations were read at the top of this
+                        # tick, before this box was teleported onto the belt just now -
+                        # without this override, this tick's BoxStates (recorded AND
+                        # live-published, Stage 5b) would show the box at its stale parked
+                        # pose (POOL_PARK_ORIGIN). Zero velocity is a reasonable
+                        # approximation for "just placed, not yet fallen". Unconditional now
+                        # - the live publish below needs it too, not just MCAP.
+                        box_positions[path] = position
+                        box_orientations[path] = quat_wxyz
+                        box_linear_vel[path] = (0.0, 0.0, 0.0)
+                        box_angular_vel[path] = (0.0, 0.0, 0.0)
                     latest_plc_bytes = state_msg.SerializeToString()
+
+                    # holding_1/2 + held_by_arm must come from held_box_path_1/2 in
+                    # external_action mode, NOT cell.pick_place(_2).holding_box/
+                    # held_box_path - those are frozen (forward() never runs there),
+                    # so every policy-run KPI would otherwise silently read "never
+                    # holding". See sim_cell.recording.resolve_arm_telemetry.
+                    # Unconditional now (Stage 5b) - the live box-state publish below
+                    # needs held_by_arm too, not just MCAP.
+                    holding_1, holding_2, held_by_arm = resolve_arm_telemetry(
+                        external_action,
+                        held_box_path_1,
+                        held_box_path_2,
+                        cell.pick_place.holding_box,
+                        cell.pick_place_2.holding_box,
+                        cell.pick_place.held_box_path,
+                        cell.pick_place_2.held_box_path,
+                    )
+                    box_states = build_box_states(
+                        active_box_paths,
+                        box_positions,
+                        box_orientations,
+                        box_linear_vel,
+                        box_angular_vel,
+                        box_id_to_variant,
+                        held_by_arm,
+                    )
+                    cell.robot_state_publisher.publish_box_states(sim_time, box_states)
+
                     if mcap_recorder is not None:
                         # Same object, not re-parsed from latest_plc_bytes - state_msg
                         # is freshly built this tick and never mutated again.
                         mcap_recorder.record_state_conveyors(sim_time, state_msg)
-                        # holding_1/2 + held_by_arm must come from held_box_path_1/2 in
-                        # external_action mode, NOT cell.pick_place(_2).holding_box/
-                        # held_box_path - those are frozen (forward() never runs there),
-                        # so every policy-run KPI would otherwise silently read "never
-                        # holding". See sim_cell.recording.resolve_arm_telemetry.
-                        holding_1, holding_2, held_by_arm = resolve_arm_telemetry(
-                            external_action,
-                            held_box_path_1,
-                            held_box_path_2,
-                            cell.pick_place.holding_box,
-                            cell.pick_place_2.holding_box,
-                            cell.pick_place.held_box_path,
-                            cell.pick_place_2.held_box_path,
-                        )
                         mcap_recorder.record_position_status(
                             1,
                             sim_time,
@@ -415,18 +435,7 @@ def run(simulation_app) -> None:
                             list(np.degrees(cell.robot2.get_dof_positions().numpy()[0])),
                             _DIO_HOLDING if holding_2 else _DIO_EMPTY,
                         )
-                        mcap_recorder.record_box_states(
-                            sim_time,
-                            build_box_states(
-                                active_box_paths,
-                                box_positions,
-                                box_orientations,
-                                box_linear_vel,
-                                box_angular_vel,
-                                box_id_to_variant,
-                                held_by_arm,
-                            ),
-                        )
+                        mcap_recorder.record_box_states(sim_time, box_states)
                         # Independent of control mode (unlike holding_1/2 above) - the
                         # tool_prim GeomPrim tracks the arm's actual physical
                         # wrist_3_link/flange regardless of whether forward() runs.

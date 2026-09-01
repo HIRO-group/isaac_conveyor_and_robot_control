@@ -48,6 +48,7 @@ MCAP_OUTPUT_DIR = str(Path(settings.LOG_OUTPUT_DIR) / "mcap")
 INSTANCE_INDEX_ENV_VAR = "CONVEYOR_INDEXING_INSTANCE_INDEX"
 
 _HELD_BY_NONE = 0
+_ZERO_VEC = (0.0, 0.0, 0.0)
 
 # Re-exported so sim_cell.runner can record box events without importing the
 # generated sim_state_pb2 module directly.
@@ -357,13 +358,19 @@ def build_box_states(
     tick). ``held_by_arm`` is {box_path: 1|2} for whichever box(es) are
     currently attached - see
     pick_and_place.controller.MagicAttachPickPlace.held_box_path.
+
+    ``box_linear_vel``/``box_angular_vel`` are looked up with a zero-vector
+    default (Stage 5b, docs/progress-tracker.md): they're only populated
+    when an MCAP recorder is attached (an extra PhysX velocity-sync call a
+    live-only box-telemetry publish - a policy needs position/hold state,
+    not velocity - shouldn't have to pay for).
     """
     boxes = []
     for path in active_box_paths:
         pos = box_positions[path]
         quat = box_orientations[path]  # (w, x, y, z) - Isaac Sim convention, see proto/sim_state.proto
-        lin = box_linear_vel[path]
-        ang = box_angular_vel[path]
+        lin = box_linear_vel.get(path, _ZERO_VEC)
+        ang = box_angular_vel.get(path, _ZERO_VEC)
         boxes.append(
             sim_state_pb2.BoxState(
                 box_id=path,
