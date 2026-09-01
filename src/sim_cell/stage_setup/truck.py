@@ -65,7 +65,8 @@ def despawn_boxes_in_truck(
     for box_path, (x, y, z) in box_positions.items():
         in_x = truck_bed_min[0] <= x <= truck_bed_max[0]
         in_y = truck_bed_min[1] <= y <= truck_bed_max[1]
-        if in_x and in_y and z <= truck_bed_max[2]:
+        in_z = truck_bed_min[2] <= z <= truck_bed_max[2]
+        if in_x and in_y and in_z:
             landed_paths.append(box_path)
     for box_path in landed_paths:
         rigid_prim = box_rigid_prims[box_path]
