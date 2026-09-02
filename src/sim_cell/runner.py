@@ -28,7 +28,7 @@ from sim_cell.recording import (
     validate_external_action_recording,
 )
 from sim_cell.stage_setup import prepare_stage
-from sim_cell.stage_setup.truck import despawn_boxes_in_truck
+from sim_cell.stage_setup.truck import despawn_boxes_below_floor, despawn_boxes_in_truck
 
 # Suction on + all 8 cups on - the sim's magic attach has no per-cup
 # actuation, so this always toggles as one block (see sim_cell.recording's
@@ -126,6 +126,16 @@ def run(simulation_app) -> None:
     camera_role_by_serial = {spec.serial: spec.role for spec in cell.camera_specs}
     box_id_to_variant = {path: variant for variant, paths in cell.pool.paths_by_variant.items() for path in paths}
     active_box_paths: set = set()
+    # 2026-09-02: box-age gate for despawn_boxes_below_floor (see below) - a
+    # freshly-spawned box's collider isn't guaranteed active on its very
+    # first tick(s), so it can free-fall through the belt surface briefly
+    # before physics catches it. Confirmed live: on a fresh sim launch,
+    # despawn_boxes_below_floor without this gate wrongly caught ~20 boxes
+    # (nearly the whole initial pool) within seconds of spawn - a real,
+    # observed false-positive, not a hypothetical. FLOOR_DESPAWN_MIN_AGE_S
+    # gives every box a grace window to settle before it's eligible.
+    box_first_seen_time: dict = {}
+    FLOOR_DESPAWN_MIN_AGE_S = 3.0
     prev_phase_1 = cell.pick_place.phase_name
     prev_phase_2 = cell.pick_place_2.phase_name
 
@@ -357,7 +367,28 @@ def run(simulation_app) -> None:
                         cell.truck_bed_min,
                         cell.truck_bed_max,
                     )
-                    for path in landed_box_paths:
+                    # 2026-09-02: a box knocked off a belt onto the floor (a real,
+                    # observed failure mode under external-action control - see
+                    # capability-diffusion's Stage 7c investigation) never lands in
+                    # the truck bed, so despawn_boxes_in_truck alone leaves it on
+                    # the floor forever, permanently shrinking the usable box pool.
+                    # Mirrors the truck-despawn handling exactly, just gated on
+                    # FLOOR_Z_THRESHOLD instead of the truck bed AABB - restricted
+                    # to boxes past FLOOR_DESPAWN_MIN_AGE_S (see box_first_seen_time's
+                    # own comment above for why: a just-spawned box's collider isn't
+                    # guaranteed active on its first tick(s)).
+                    floor_check_positions = {
+                        path: pos
+                        for path, pos in box_positions.items()
+                        if sim_time - box_first_seen_time.get(path, sim_time) >= FLOOR_DESPAWN_MIN_AGE_S
+                    }
+                    grounded_box_paths = despawn_boxes_below_floor(
+                        cell.box_rigid_prims,
+                        floor_check_positions,
+                        settings.FLOOR_Z_THRESHOLD,
+                    )
+                    despawned_box_paths = landed_box_paths + grounded_box_paths
+                    for path in despawned_box_paths:
                         if mcap_recorder is not None:
                             mcap_recorder.record_box_event(
                                 sim_time,
@@ -368,10 +399,12 @@ def run(simulation_app) -> None:
                                 tuple(box_orientations[path]),
                             )
                         active_box_paths.discard(path)
-                    # Recycle truck-landed boxes back into the pool, then spawn a new
-                    # wave if ConveyorTrack (loop1 zone 0) just emptied out - reuses
-                    # the occupancy loop1.step already computed this tick.
-                    cell.spawner.release(landed_box_paths)
+                        box_first_seen_time.pop(path, None)
+                    # Recycle truck-landed and floor-grounded boxes back into the
+                    # pool, then spawn a new wave if ConveyorTrack (loop1 zone 0)
+                    # just emptied out - reuses the occupancy loop1.step already
+                    # computed this tick.
+                    cell.spawner.release(despawned_box_paths)
                     spawned = cell.spawner.update(sim_time, cell.loop1.occupied[0])
                     for path, variant, position, quat_wxyz in spawned:
                         if mcap_recorder is not None:
@@ -379,6 +412,7 @@ def run(simulation_app) -> None:
                                 sim_time, BOX_EVENT_SPAWNED, path, variant, position, quat_wxyz
                             )
                         active_box_paths.add(path)
+                        box_first_seen_time[path] = sim_time
                         # box_positions/box_orientations were read at the top of this
                         # tick, before this box was teleported onto the belt just now -
                         # without this override, this tick's BoxStates (recorded AND

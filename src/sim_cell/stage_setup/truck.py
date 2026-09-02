@@ -75,3 +75,30 @@ def despawn_boxes_in_truck(
         rigid_prim.set_world_poses(positions=[DESPAWNED_BOX_PARK_POSITION])
         logger.info("despawned %s - landed in %s", box_path, truck_path)
     return landed_paths
+
+
+def despawn_boxes_below_floor(
+    box_rigid_prims: dict,
+    box_positions: dict,
+    floor_z_threshold: float,
+) -> list:
+    """Disable, hide, and park any box that has fallen below `floor_z_threshold`
+    (knocked off a conveyor belt onto the floor by a failed pick/place attempt -
+    see capability-diffusion's Stage 7c investigation, 2026-09-02, for the
+    real, observed failure mode this closes: without this, a grounded box sits
+    on the floor forever, permanently shrinking the usable box pool for any
+    external-action-mode client). Mirrors despawn_boxes_in_truck's mechanics
+    exactly (same disable/hide/teleport-park pattern, same reason a real prim
+    removal isn't used - see that function's own docstring) - only the trigger
+    condition differs (a world-Z threshold instead of the truck bed AABB).
+    Returns the paths that were despawned this call, so sim_cell.box_spawner
+    can recycle them back into its pool the same way truck-landed boxes are.
+    """
+    grounded_paths = [path for path, (x, y, z) in box_positions.items() if z < floor_z_threshold]
+    for box_path in grounded_paths:
+        rigid_prim = box_rigid_prims[box_path]
+        rigid_prim.set_enabled_rigid_bodies([False])
+        rigid_prim.set_visibilities([False])
+        rigid_prim.set_world_poses(positions=[DESPAWNED_BOX_PARK_POSITION])
+        logger.info("despawned %s - fell below floor threshold z=%.3f", box_path, floor_z_threshold)
+    return grounded_paths

@@ -18,7 +18,20 @@ logger = logging.getLogger(__name__)
 # Deliberately looser than the autonomous controller's ATTACH_MAX_DISTANCE (see
 # phases.py, 0.005m) - a separate, tunable gate for external-control testing,
 # not a claim that 0.20m is physically close enough to actually pick up a box.
-EXTERNAL_ATTACH_MAX_DISTANCE = 0.35  # meters
+#
+# Bumped 0.35 -> 0.5 (2026-09-01, one-off diagnostic: real rollout-eval data
+# showed F-D's arm1/arm2 settling within 0.48-0.65m of a real box but never
+# crossing 0.35m). Bumped again 0.5 -> 1.0 (2026-09-02, capability-diffusion's
+# Stage 7c real-pick work, user-authorized): with the commanding client's
+# pick-target height AND orientation both confirmed correct (independently
+# verified - FK-matched target computation, live visual confirmation of the
+# approach motion), live proximity-check readings still ran 0.4-0.9m -
+# widened here to unblock data collection rather than leave it stuck on a
+# residual gap that's tracked separately (see capability-diffusion's own
+# docs/progress-tracker.md, Stage 7c section, for the investigation this
+# value change is part of). Revert or re-tighten once that residual gap is
+# itself root-caused and closed.
+EXTERNAL_ATTACH_MAX_DISTANCE = 1.0  # meters
 
 
 def apply_suction_edge(arm: int, pick_place, box_rigid_prims: dict, suction: bool, held_box_path, candidate_box_path):

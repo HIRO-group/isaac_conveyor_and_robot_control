@@ -37,6 +37,16 @@ ROBOT_POSITION = (-3.0, 1.0928, 0.0)  # (x, y, z-of-ground-contact); Y = loop mi
 PEDESTAL_HEIGHT = 1.6
 PLACE_XY = (-3.0, 2.1857)  # ConveyorTrack_09's belt-top Y center
 
+# All 5 conveyor zones share the same real belt-top Z (confirmed via
+# scripts/export_zone_geometry.py, 2026-09-02: every zone's belt_top_z ~=
+# 1.7805m). A box knocked off any belt onto the floor falls well below this
+# (observed z in [-0.0, 0.21] for grounded boxes vs. 1.78 for belt-resting
+# ones) - this threshold gates sim_cell.stage_setup.truck.despawn_boxes_
+# below_floor, recycling a permanently-grounded box back into the spawner
+# pool the same way a truck-landed one is, instead of leaving it on the
+# floor forever shrinking the usable box pool for any client.
+FLOOR_Z_THRESHOLD = 1.0
+
 # Camera rig tuning (see src/cameras/, sim_cell.camera_layout). 640x480@30 RGB8
 # matches theia's production default camera config (~theia/infra/etcd/bootstrap/
 # seed/defaults.json's camera.config.default), so sim data looks like real data.
