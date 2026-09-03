@@ -88,7 +88,7 @@ class RobotStateZenohPublisher:
     def publish_conveyor_state(self, state_msg: plc.StateConveyors) -> None:
         self._conveyor_publisher.put(state_msg.SerializeToString())
 
-    def publish_box_states(self, sim_time_s: float, boxes: list) -> None:
+    def publish_box_states(self, sim_time_s: float, boxes: list, truck_deliveries_count: int = 0) -> None:
         """`boxes`: list of `sim_state_pb2.BoxState`, e.g. from
         `sim_cell.recording.build_box_states` - live counterpart of what
         `conveyor_indexing.mcap_recorder.record_box_states` already writes
@@ -96,8 +96,18 @@ class RobotStateZenohPublisher:
         controller can react to real box position/hold state the same way
         it already can for arm/conveyor state, without needing camera
         perception.
+
+        `truck_deliveries_count` (2026-09-02, capability-diffusion's
+        Stage 7c investigation): the sim's own authoritative running count
+        of `despawn_boxes_in_truck` despawns SPECIFICALLY - see
+        sim_state.proto's `BoxStates.truck_deliveries_count` for why a
+        client can't reconstruct this from `boxes` alone (a box vanishing
+        from this list is equally consistent with a floor-despawn or a
+        stale-despawn, neither of which is a real delivery).
         """
-        msg = sim_state.BoxStates(sim_time_s=sim_time_s, boxes=boxes)
+        msg = sim_state.BoxStates(
+            sim_time_s=sim_time_s, boxes=boxes, truck_deliveries_count=truck_deliveries_count
+        )
         self._box_state_publisher.put(msg.SerializeToString())
 
     def close(self) -> None:

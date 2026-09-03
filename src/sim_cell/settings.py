@@ -45,7 +45,27 @@ PLACE_XY = (-3.0, 2.1857)  # ConveyorTrack_09's belt-top Y center
 # below_floor, recycling a permanently-grounded box back into the spawner
 # pool the same way a truck-landed one is, instead of leaving it on the
 # floor forever shrinking the usable box pool for any client.
-FLOOR_Z_THRESHOLD = 1.0
+#
+# CRITICAL FIX (2026-09-02, capability-diffusion's Stage 7c part 8/9
+# investigation): 1.0 was ABOVE the truck bed's own real top surface -
+# confirmed via a one-off prepare_stage() AABB dump: truck_bed_max z =
+# 0.950 (truck_bed_min z = 0.265). Since despawn_boxes_in_truck and
+# despawn_boxes_below_floor both run every tick on the same box_positions,
+# and a box legitimately falling from belt height (1.78) into the truck
+# bed passes through z<1.0 WHILE STILL MID-AIR, well before its (x, y) has
+# traveled far enough to satisfy despawn_boxes_in_truck's tighter AABB
+# check - the OLD threshold caught every genuine truck-bound box first and
+# recycled it as a "floor despawn," so despawn_boxes_in_truck's own check
+# never got a chance to fire. This silently produced a real, measured 0%
+# truck-delivery rate for an entire investigation (capability-diffusion's
+# docs/progress-tracker.md "part 5" through "part 8") even under fully
+# nominal conditions with a correctly-placed box - not a pick/place/grip
+# bug at all, a floor-threshold misconfiguration undermining every
+# genuine delivery. 0.24 sits strictly between the observed genuine-
+# ground-drop max (0.21) and the truck bed's own floor (0.265), so a real
+# floor-grounded box is still caught while a box settling into the truck
+# bed range is not.
+FLOOR_Z_THRESHOLD = 0.24
 
 # Camera rig tuning (see src/cameras/, sim_cell.camera_layout). 640x480@30 RGB8
 # matches theia's production default camera config (~theia/infra/etcd/bootstrap/

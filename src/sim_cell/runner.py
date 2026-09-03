@@ -136,6 +136,11 @@ def run(simulation_app) -> None:
     # gives every box a grace window to settle before it's eligible.
     box_first_seen_time: dict = {}
     FLOOR_DESPAWN_MIN_AGE_S = 3.0
+    # 2026-09-02 (capability-diffusion's Stage 7c investigation): the sim's
+    # own authoritative count of GENUINE truck arrivals, distinct from
+    # floor- and stale-despawns - see publish_box_states's own docstring
+    # for why a client can't reconstruct this from BoxStates.boxes alone.
+    truck_deliveries_count = 0
     # 2026-09-02 (fourth Stage 7c root-cause pass): a box an external-action
     # client gives up on (repeated ik_unreachable/attach_failed) never lands
     # in the truck bed or falls below the floor, so it sits at proper belt
@@ -376,6 +381,7 @@ def run(simulation_app) -> None:
                         cell.truck_bed_min,
                         cell.truck_bed_max,
                     )
+                    truck_deliveries_count += len(landed_box_paths)
                     # 2026-09-02: a box knocked off a belt onto the floor (a real,
                     # observed failure mode under external-action control - see
                     # capability-diffusion's Stage 7c investigation) never lands in
@@ -477,7 +483,7 @@ def run(simulation_app) -> None:
                         box_id_to_variant,
                         held_by_arm,
                     )
-                    cell.robot_state_publisher.publish_box_states(sim_time, box_states)
+                    cell.robot_state_publisher.publish_box_states(sim_time, box_states, truck_deliveries_count)
 
                     if mcap_recorder is not None:
                         # Same object, not re-parsed from latest_plc_bytes - state_msg
