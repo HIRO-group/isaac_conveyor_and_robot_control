@@ -102,3 +102,35 @@ def despawn_boxes_below_floor(
         rigid_prim.set_world_poses(positions=[DESPAWNED_BOX_PARK_POSITION])
         logger.info("despawned %s - fell below floor threshold z=%.3f", box_path, floor_z_threshold)
     return grounded_paths
+
+
+def despawn_stale_boxes(box_positions: dict, box_ages_s: dict, max_age_s: float, box_rigid_prims: dict) -> list:
+    """Disable, hide, and park any box that has been active for longer than
+    `max_age_s` without being delivered (despawn_boxes_in_truck) or grounded
+    (despawn_boxes_below_floor) - see capability-diffusion's Stage 7c
+    investigation, 2026-09-02 (fourth root-cause pass): a box an external-
+    action client gives up on (e.g. after repeated `ik_unreachable`/
+    `attach_failed`) has no other removal path - it isn't in the truck bed
+    and it hasn't fallen below the floor, so it sits at proper belt height
+    FOREVER. Confirmed live: this permanently keeps `BoxSpawner`'s trigger
+    zone "occupied" (see box_spawner.py's `update`, which only spawns a new
+    wave when its zone reads empty), so ONE abandoned box silently starves
+    the entire pool dry - reproduced deterministically (same spawn seed,
+    fresh sim restart) hitting the identical dead end within ~10 examples
+    every time, not a one-off. Mirrors despawn_boxes_in_truck/
+    despawn_boxes_below_floor's exact mechanics (same disable/hide/
+    teleport-park pattern) - only the trigger condition differs (age
+    instead of position). Callers must exclude any box currently held by
+    an arm from `box_positions`/`box_ages_s` - this function has no way to
+    know a box is mid-transport, and `max_age_s` should be set well above a
+    real end-to-end pick+place cycle's typical duration so a working
+    pipeline never triggers this, only a genuinely abandoned box does.
+    """
+    stale_paths = [path for path in box_positions if box_ages_s.get(path, 0.0) >= max_age_s]
+    for box_path in stale_paths:
+        rigid_prim = box_rigid_prims[box_path]
+        rigid_prim.set_enabled_rigid_bodies([False])
+        rigid_prim.set_visibilities([False])
+        rigid_prim.set_world_poses(positions=[DESPAWNED_BOX_PARK_POSITION])
+        logger.info("despawned %s - stale (age >= %.1fs, never delivered or grounded)", box_path, max_age_s)
+    return stale_paths

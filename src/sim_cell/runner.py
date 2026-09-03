@@ -28,7 +28,7 @@ from sim_cell.recording import (
     validate_external_action_recording,
 )
 from sim_cell.stage_setup import prepare_stage
-from sim_cell.stage_setup.truck import despawn_boxes_below_floor, despawn_boxes_in_truck
+from sim_cell.stage_setup.truck import despawn_boxes_below_floor, despawn_boxes_in_truck, despawn_stale_boxes
 
 # Suction on + all 8 cups on - the sim's magic attach has no per-cup
 # actuation, so this always toggles as one block (see sim_cell.recording's
@@ -136,6 +136,15 @@ def run(simulation_app) -> None:
     # gives every box a grace window to settle before it's eligible.
     box_first_seen_time: dict = {}
     FLOOR_DESPAWN_MIN_AGE_S = 3.0
+    # 2026-09-02 (fourth Stage 7c root-cause pass): a box an external-action
+    # client gives up on (repeated ik_unreachable/attach_failed) never lands
+    # in the truck bed or falls below the floor, so it sits at proper belt
+    # height forever - which permanently keeps BoxSpawner's trigger zone
+    # "occupied" and starves every future wave. STALE_BOX_MAX_AGE_S is set
+    # well above a real end-to-end pick+place cycle's typical duration
+    # (observed ~10-20s/example when a box is found promptly) so a working
+    # pipeline never triggers this - see despawn_stale_boxes's own docstring.
+    STALE_BOX_MAX_AGE_S = 90.0
     prev_phase_1 = cell.pick_place.phase_name
     prev_phase_2 = cell.pick_place_2.phase_name
 
@@ -387,7 +396,24 @@ def run(simulation_app) -> None:
                         floor_check_positions,
                         settings.FLOOR_Z_THRESHOLD,
                     )
-                    despawned_box_paths = landed_box_paths + grounded_box_paths
+                    # Exclude any box currently held by an arm - despawn_stale_boxes has
+                    # no way to know a box is mid-transport, so callers must filter held
+                    # boxes out themselves (see its own docstring).
+                    stale_check_positions = {
+                        path: pos
+                        for path, pos in box_positions.items()
+                        if path != held_box_path_1 and path != held_box_path_2
+                    }
+                    stale_box_ages_s = {
+                        path: sim_time - box_first_seen_time.get(path, sim_time) for path in stale_check_positions
+                    }
+                    stale_box_paths = despawn_stale_boxes(
+                        stale_check_positions,
+                        stale_box_ages_s,
+                        STALE_BOX_MAX_AGE_S,
+                        cell.box_rigid_prims,
+                    )
+                    despawned_box_paths = landed_box_paths + grounded_box_paths + stale_box_paths
                     for path in despawned_box_paths:
                         if mcap_recorder is not None:
                             mcap_recorder.record_box_event(
