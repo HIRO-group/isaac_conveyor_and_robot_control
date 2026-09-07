@@ -374,9 +374,26 @@ def run(simulation_app) -> None:
                                 if item is not None:
                                     item.Speed, item.Direction = resolve_override_speed_direction(False, 0, 0)
                     cell.robot_state_publisher.publish_conveyor_state(state_msg)
+                    # Exclude any box currently held by an arm from EVERY despawn check
+                    # below (truck/floor/stale) - none of the three has any way to know a
+                    # box is mid-transport (still rigidly FixedJoint-attached to a wrist),
+                    # only the caller can. Previously only despawn_stale_boxes's own call
+                    # site filtered this (see its docstring); despawn_boxes_in_truck/
+                    # despawn_boxes_below_floor had no exclusion at all, so a held box
+                    # whose live position transiently satisfied either check (e.g. a
+                    # real momentary collision/contact jitter while carried) got
+                    # despawned - parked, hidden, disabled - out from under the arm's
+                    # own FixedJoint, permanently vanishing from published box state even
+                    # though the client never released it. That surfaced downstream as a
+                    # spurious `dropped_in_transit` (a telemetry/despawn bug, not an
+                    # actual grip failure) rather than a real physical drop.
+                    held_box_paths = {p for p in (held_box_path_1, held_box_path_2) if p is not None}
+                    truck_check_positions = {
+                        path: pos for path, pos in box_positions.items() if path not in held_box_paths
+                    }
                     landed_box_paths = despawn_boxes_in_truck(
                         cell.box_rigid_prims,
-                        box_positions,
+                        truck_check_positions,
                         layout.TRUCK_PATH,
                         cell.truck_bed_min,
                         cell.truck_bed_max,
@@ -395,20 +412,16 @@ def run(simulation_app) -> None:
                     floor_check_positions = {
                         path: pos
                         for path, pos in box_positions.items()
-                        if sim_time - box_first_seen_time.get(path, sim_time) >= FLOOR_DESPAWN_MIN_AGE_S
+                        if path not in held_box_paths
+                        and sim_time - box_first_seen_time.get(path, sim_time) >= FLOOR_DESPAWN_MIN_AGE_S
                     }
                     grounded_box_paths = despawn_boxes_below_floor(
                         cell.box_rigid_prims,
                         floor_check_positions,
                         settings.FLOOR_Z_THRESHOLD,
                     )
-                    # Exclude any box currently held by an arm - despawn_stale_boxes has
-                    # no way to know a box is mid-transport, so callers must filter held
-                    # boxes out themselves (see its own docstring).
                     stale_check_positions = {
-                        path: pos
-                        for path, pos in box_positions.items()
-                        if path != held_box_path_1 and path != held_box_path_2
+                        path: pos for path, pos in box_positions.items() if path not in held_box_paths
                     }
                     stale_box_ages_s = {
                         path: sim_time - box_first_seen_time.get(path, sim_time) for path in stale_check_positions
