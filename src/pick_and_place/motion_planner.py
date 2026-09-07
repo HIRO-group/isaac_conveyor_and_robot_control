@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 
 import isaacsim.core.experimental.utils.stage as stage_utils
 import isaacsim.robot_motion.experimental.motion_generation as mg
@@ -47,6 +48,7 @@ def build_motion_planner(
         disable_obstacle_tracking: Debug escape hatch - skips the AABB obstacle
             scan entirely (planner sees an empty world). Off in normal use.
     """
+    _t_start = time.monotonic()
     cumotion_robot = load_cumotion_robot(directory=UR20_CONFIG_DIR)
     tool_frames = cumotion_robot.robot_description.tool_frame_names()
     if TOOL_FRAME_NAME not in tool_frames:
@@ -116,4 +118,5 @@ def build_motion_planner(
         cumotion_world_interface=world_binding.get_world_interface(),
         tool_frame=TOOL_FRAME_NAME,
     )
+    logger.warning("BUILD_MOTION_PLANNER_TIMING robot_path=%s elapsed_s=%.3f", robot_path, time.monotonic() - _t_start)
     return planner, world_binding, cumotion_robot

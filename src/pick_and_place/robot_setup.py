@@ -19,6 +19,7 @@ def create_pedestal_and_robot(
     position: tuple,
     pedestal_height: float,
     pedestal_radius: float = 0.15,
+    usd_path: str | None = None,
 ) -> Articulation:
     """Create a simple static cylindrical pedestal and a UR20 on top of it.
 
@@ -26,6 +27,18 @@ def create_pedestal_and_robot(
         position: (x, y, z) of the pedestal's base (ground contact point).
         pedestal_height: Pedestal column height; the robot is placed at
             z = position[2] + pedestal_height.
+        usd_path: Overrides which UR20 USD asset to reference - defaults to
+            the nominal NUCLEUS-hosted one. Reach-degradation fix (2026-09-03):
+            a robot's real joint limits live on this USD asset itself (not any
+            per-example runtime config - confirmed via direct inspection,
+            shoulder_pan_joint's UsdPhysics.RevoluteJoint limit attrs read
+            +-360deg on the nominal asset), so injecting reach degradation the
+            way the native motion planner can use means swapping in a
+            different, pre-baked local USD variant with a narrower limit
+            (see scripts/generate_ur20_reach_presets.py) - not a cheap
+            per-example change, a full pedestal+robot (re)creation, which only
+            happens once per sim launch. Pass one of those variants' path
+            here to run this cell with degraded reach from the start.
     """
     px, py, pz = position
     pedestal = Cylinder(
@@ -38,7 +51,7 @@ def create_pedestal_and_robot(
     # Static collider only - no RigidBodyAPI, so it doesn't fall under gravity
     # and isn't mistaken for a kinematic/dynamic body by anything else.
     UsdPhysics.CollisionAPI.Apply(pedestal.prims[0])
-    usd_path = get_assets_root_path() + "/Isaac/Robots/UniversalRobots/ur20/ur20.usd"
+    usd_path = usd_path or (get_assets_root_path() + "/Isaac/Robots/UniversalRobots/ur20/ur20.usd")
     robot_prim = stage_utils.add_reference_to_stage(usd_path=usd_path, path=robot_path, variants=[])
     xformable = UsdGeom.Xformable(robot_prim)
     xformable.ClearXformOpOrder()

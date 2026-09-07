@@ -59,6 +59,46 @@ RECORD_MCAP_CAMERAS_ENV_VAR = "CONVEYOR_INDEXING_RECORD_MCAP_CAMERAS"
 
 logger = logging.getLogger(__name__)
 
+# Task #56/#60 convergence-freeze investigation (2026-09-04): the
+# capability-diffusion collection runs repeatedly showed a joint's live pose
+# freeze at a fixed residual for the rest of a session, silently, with no
+# exception anywhere. box_spawner.py already had to reach into
+# RigidPrim._physics_rigid_body_view.wake_up() because PhysX doesn't wake a
+# re-enabled body on its own; set_dof_position_targets has no equivalent
+# public wake call, and neither Articulation nor RigidPrim in this Isaac Sim
+# version expose is_sleeping(). This periodically logs DOF velocities
+# (near-zero velocity with nonzero position error would indicate a genuine
+# physics stall, not slow convergence) and defensively attempts the same
+# private-view wake_up() every tick a command is applied, tolerating
+# AttributeError/RuntimeError the same way box_spawner.py does. Diagnostic +
+# candidate fix - not yet confirmed against a live repro.
+_WAKE_DIAG_STATE: dict = {}
+
+
+def _wake_and_diagnose(articulation, arm: int, tick: int) -> None:
+    # 2026-09-04 update: the wake_up() defensive fix was tested live (Task
+    # #62) and REFUTED - the freeze reproduced even with wake_up() firing
+    # every tick, so it's removed here (this function name is kept to avoid
+    # re-threading a rename through both call sites for a diagnostic-only
+    # change). Now purely diagnostic: dof_actuation_forces alongside
+    # velocities distinguishes "drive genuinely fighting something" (forces
+    # saturated near max effort - a real mechanical block/self-collision)
+    # from "drive isn't even trying" (near-zero forces despite a large
+    # position error - a control-path bug, not a physical obstruction).
+    view = getattr(articulation, "_physics_articulation_view", None)
+    if view is None:
+        return
+    if tick % 20 == 0:
+        try:
+            vel = view.get_dof_velocities()
+            forces = view.get_dof_actuation_forces()
+            logger.info(
+                "WAKE_DIAG arm=%d tick=%d dof_velocities=%s dof_actuation_forces=%s",
+                arm, tick, vel, forces,
+            )
+        except Exception as e:
+            logger.warning("WAKE_DIAG arm=%d tick=%d diagnostic read failed: %s", arm, tick, e)
+
 
 def run(simulation_app) -> None:
     stage_prep = prepare_stage()
@@ -212,6 +252,7 @@ def run(simulation_app) -> None:
                         cell.robot.set_dof_position_targets(
                             positions=np.asarray(cmd_arm1.joint_targets, dtype=np.float32)
                         )
+                        _wake_and_diagnose(cell.robot, 1, tick)
                         held_box_path_1 = apply_suction_edge(
                             1, cell.pick_place, cell.box_rigid_prims, cmd_arm1.suction, held_box_path_1, pick_box_path
                         )
@@ -222,6 +263,7 @@ def run(simulation_app) -> None:
                         cell.robot2.set_dof_position_targets(
                             positions=np.asarray(cmd_arm2.joint_targets, dtype=np.float32)
                         )
+                        _wake_and_diagnose(cell.robot2, 2, tick)
                         held_box_path_2 = apply_suction_edge(
                             2, cell.pick_place_2, cell.box_rigid_prims, cmd_arm2.suction, held_box_path_2,
                             pick_box_path_2,

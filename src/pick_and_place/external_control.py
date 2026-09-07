@@ -29,9 +29,21 @@ logger = logging.getLogger(__name__)
 # widened here to unblock data collection rather than leave it stuck on a
 # residual gap that's tracked separately (see capability-diffusion's own
 # docs/progress-tracker.md, Stage 7c section, for the investigation this
-# value change is part of). Revert or re-tighten once that residual gap is
-# itself root-caused and closed.
-EXTERNAL_ATTACH_MAX_DISTANCE = 1.0  # meters
+# value change is part of).
+#
+# RE-TIGHTENED 1.0 -> 0.05 (2026-09-03, user-authorized): 1.0m was masking a
+# real gap instead of fixing it - the commanding client's own attach-confirm
+# retrack loop (capability-diffusion's vm_collect_stage7c_real_pick_coupling.py)
+# re-solves and publishes a fresh descend target every 0.1s without ever
+# waiting for the arm to actually converge on it before this proximity check
+# runs, so suction gets evaluated mid-transit toward a just-updated target -
+# a timing gap, not a geometry gap. 0.05m is deliberately still 10x looser
+# than the autonomous controller's 0.005m (this control path's IK/interpolation
+# has real, if now much smaller, settling imperfections of its own) but is a
+# real "surface must actually be close to the box" gate again, not a
+# meters-wide one. Re-tighten toward 0.005m once the commanding client's own
+# retrack-convergence gap (tracked separately) is closed.
+EXTERNAL_ATTACH_MAX_DISTANCE = 0.05  # meters
 
 
 def apply_suction_edge(arm: int, pick_place, box_rigid_prims: dict, suction: bool, held_box_path, candidate_box_path):

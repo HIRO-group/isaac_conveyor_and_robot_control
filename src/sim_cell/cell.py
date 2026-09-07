@@ -97,6 +97,7 @@ def build_cell(stage_prep: StagePrep) -> Cell:
         pedestal_path=layout.PEDESTAL_PATH,
         position=settings.ROBOT_POSITION,
         pedestal_height=settings.PEDESTAL_HEIGHT,
+        usd_path=os.environ.get("CONVEYOR_INDEXING_UR20_USD_ARM1") or None,
     )
 
     # Reach-balanced position for the second robot, derived from actual zone geometry
@@ -111,6 +112,7 @@ def build_cell(stage_prep: StagePrep) -> Cell:
         pedestal_path=layout.PEDESTAL_PATH_2,
         position=station_2.robot_position,
         pedestal_height=settings.PEDESTAL_HEIGHT,
+        usd_path=os.environ.get("CONVEYOR_INDEXING_UR20_USD_ARM2") or None,
     )
 
     # Place target Z depends on box height, computed per-cycle inside MagicAttachPickPlace;
