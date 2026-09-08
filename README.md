@@ -98,41 +98,7 @@ on. This prints every EE (suction) on/off toggle - both what was *commanded*
 and what actually latched, which can differ if a box wasn't really in
 reach - every conveyor command change, and a snapshot every 5s.
 
-**3. Start the AI** (from a sibling `theia` checkout - see
-`services/sim_bridge/README.md` there for full setup):
 
-```bash
-gsutil -m cp -r gs://por-theia-1/models/<checkpoint>/checkpoints/<step>/pretrained_model \
-  ~/theia/services/sim_bridge/checkpoints/<checkpoint>/checkpoints/<step>/pretrained_model
-
-cd ~/theia/services/sim_bridge
-PYTHONPATH=/tmp/sim_bridge_proto_gen:$(pwd)/src .venv/bin/python3 src/main.py \
-  --model-path checkpoints/<checkpoint>/checkpoints/<step>/pretrained_model \
-  --num-arms 2 \
-  --conveyors \
-    "/World/ConveyorTrack/ConveyorBeltGraph/ConveyorNode" \
-    "/World/ConveyorTrack_01/ConveyorBeltGraph/ConveyorNode" \
-    "/World/ConveyorTrack_02/ConveyorBeltGraph/ConveyorNode" \
-    "/World/ConveyorTrack_09/ConveyorBeltGraph/ConveyorNode" \
-    "/World/ConveyorTrack_10/ConveyorBeltGraph/ConveyorNode" \
-  --loop-hz 30
-```
-
-- The `--conveyors` order above is this repo's actual zone order (loop1's 3
-  zones, then loop2's 2 - see `src/sim_cell/layout.py`'s
-  `ZONE_NODE_PATHS_LOOP1`/`ZONE_NODE_PATHS_LOOP2`), which is also the order
-  `theia/plc/state_conveyors` reports them in and what a checkpoint trained
-  via this repo's recordings was trained with - get this wrong and the
-  policy's actions get silently misaligned with the wrong conveyors.
-- Only download `pretrained_model/`, not the sibling `training_state/` -
-  that's optimizer state, not needed for inference, and is most of a
-  checkpoint's size.
-- `checkpoints/last` is a gcsfuse-only symlink `gsutil cp` can't follow; pick
-  the highest-numbered `checkpoints/<step>` directory instead.
-- Add `--conveyor-speed-multiplier <N>` (default 1.0) to rescale a
-  checkpoint's raw predicted conveyor speed_pct before publishing (clamped to
-  0-100) - a knob for compensating an under-scaled prediction empirically,
-  not a training-data property.
 
 To stop, kill all three in any order; re-running from step 1 is the safest
 way to guarantee no stale state carries over.
