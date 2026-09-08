@@ -38,7 +38,7 @@ import time
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 GCLOUD = "/snap/bin/gcloud"  # absolute: nohup/cron environments may lack /snap/bin on PATH
-DEFAULT_GCS_PREFIX = "gs://por-theia-1/data_collection/sim"
+DEFAULT_GCS_PREFIX = "gs://YOUR_BUCKET/data_collection/sim"
 SWEEP_INTERVAL_S = 15.0
 DISK_WARN_PCT = 80.0
 DISK_ABORT_PCT = 90.0
@@ -312,8 +312,8 @@ def main() -> int:
         preflight(gcs_run_prefix, run_info, data_dir)
 
     if not pathlib.Path("/tmp/proto_gen/sim_state_pb2.py").exists():
-        logger.info("proto bindings missing - running gen_proto.sh")
-        subprocess.run(["bash", str(REPO / "gen_proto.sh")], check=True)
+        logger.info("proto bindings missing - running proto/gen_proto.sh")
+        subprocess.run(["bash", str(REPO / "proto" / "gen_proto.sh")], check=True)
 
     exit_code, wall_s = run_sim(args, data_dir, sim_log, uploader)
     logger.info("sim exited with code %s after %.0fs wall", exit_code, wall_s)

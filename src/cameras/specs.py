@@ -1,5 +1,5 @@
 """Value bundle describing one sim camera, plus the pure (no-USD, no-Zenoh)
-helpers that turn a list of these into theia-contract protobuf messages.
+helpers that turn a list of these into wire-contract protobuf messages.
 Kept USD-free and Zenoh-free so it's unit-testable without Isaac Sim.
 """
 
@@ -9,27 +9,27 @@ from dataclasses import dataclass
 
 from cameras.protos import camera
 
-# theia's collector reshapes color frames as (height, width, 3) and only
-# flips channels when "BGR" is in the format string - RGB8 is the safest,
-# most-widely-accepted format string on theia's format_mapper (see the
-# top-level README's "Design" section).
+# Downstream consumers reshape color frames as (height, width, 3) and only
+# flip channels when "BGR" is in the format string - RGB8 is the safest,
+# most-widely-accepted format string (see the top-level README's "Design"
+# section).
 COLOR_FORMAT = "RGB8"
 
 
 def color_topic(serial: str) -> str:
-    """theia's listening namespace for this camera's color stream - a key
-    literal on theia's side (`theia/camera/{serial}/color`), not something
-    this repo can look up; changing it would silently stop theia from being
-    able to discover the stream, so treat it as a wire-contract constant.
+    """This camera's color-stream key - a wire-contract constant
+    (`sim/camera/{serial}/color`), not something this repo can look up;
+    changing it would silently stop consumers from being able to discover
+    the stream.
     """
-    return f"theia/camera/{serial}/color"
+    return f"sim/camera/{serial}/color"
 
 
 def depth_topic(serial: str) -> str:
     """Advertised for contract completeness even though no depth frames are
     published yet (see CameraSpec's docstring) - kept in sync with color_topic.
     """
-    return f"theia/camera/{serial}/depth"
+    return f"sim/camera/{serial}/depth"
 
 
 @dataclass(frozen=True)
@@ -63,7 +63,7 @@ class CameraSpec:
 
 
 def camera_info(spec: CameraSpec) -> camera.CameraInfo:
-    """Build the theia-contract CameraInfo for one spec. Depth fields stay at
+    """Build the wire-contract CameraInfo for one spec. Depth fields stay at
     their proto zero-value (width=0, height=0, fps=0, format="") - color only.
     """
     return camera.CameraInfo(

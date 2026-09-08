@@ -2,8 +2,8 @@
 line every time an arm's suction (EE) toggles on/off, or a conveyor's
 commanded run/speed/direction changes, plus a periodic snapshot so a quiet
 sim isn't mistaken for a dead one. Read-only observer over the same Zenoh bus
-the sim and an external controller (e.g. theia's sim_bridge) already use - no
-interference with either process.
+the sim and an external controller (e.g. a trained policy's bridge process)
+already use - no interference with either process.
 
 Start this BEFORE the external controller, right after the sim itself is up -
 Zenoh has no message replay, so a subscriber only ever sees samples published
@@ -12,7 +12,7 @@ after it declared its subscription. Starting this first (and confirming the
 transition is missed. See the top-level README's "Running a trained policy in
 closed loop" section for the full three-step order.
 
-Usage (same PYTHONPATH as scripts/run.sh - see that script/gen_proto.sh):
+Usage (same PYTHONPATH as scripts/run.sh - see that script and proto/gen_proto.sh):
   PYTHONPATH=/tmp/proto_gen /home/ubuntu/IsaacSim/python.sh \
     scripts/monitor_external_action.py
 """
@@ -124,10 +124,10 @@ def main() -> None:
     subs = [
         session.declare_subscriber("sim/arm/1/action_command", lambda s: _on_arm_action(1, s)),
         session.declare_subscriber("sim/arm/2/action_command", lambda s: _on_arm_action(2, s)),
-        session.declare_subscriber("theia/robot/arm1/position_status", lambda s: _on_arm_state(1, s)),
-        session.declare_subscriber("theia/robot/arm2/position_status", lambda s: _on_arm_state(2, s)),
+        session.declare_subscriber("sim/robot/arm1/position_status", lambda s: _on_arm_state(1, s)),
+        session.declare_subscriber("sim/robot/arm2/position_status", lambda s: _on_arm_state(2, s)),
         session.declare_subscriber("sim/conveyor/command", _on_conveyor_command),
-        session.declare_subscriber("theia/plc/state_conveyors", _on_conveyor_state),
+        session.declare_subscriber("sim/plc/state_conveyors", _on_conveyor_state),
     ]
 
     try:

@@ -1,40 +1,40 @@
 {
   "configById": {
     "Image!sim1pick": {
-      "imageMode": { "imageTopic": "theia/camera/SIM1-PICK/color" },
+      "imageMode": { "imageTopic": "sim/camera/SIM1-PICK/color" },
       "foxglovePanelTitle": "SIM1-PICK"
     },
     "Image!sim2pick": {
-      "imageMode": { "imageTopic": "theia/camera/SIM2-PICK/color" },
+      "imageMode": { "imageTopic": "sim/camera/SIM2-PICK/color" },
       "foxglovePanelTitle": "SIM2-PICK"
     },
     "Image!sim1place": {
-      "imageMode": { "imageTopic": "theia/camera/SIM1-PLACE/color" },
+      "imageMode": { "imageTopic": "sim/camera/SIM1-PLACE/color" },
       "foxglovePanelTitle": "SIM1-PLACE"
     },
     "Image!sim2place": {
-      "imageMode": { "imageTopic": "theia/camera/SIM2-PLACE/color" },
+      "imageMode": { "imageTopic": "sim/camera/SIM2-PLACE/color" },
       "foxglovePanelTitle": "SIM2-PLACE"
     },
     "Image!sim1hand": {
-      "imageMode": { "imageTopic": "theia/camera/SIM1-HAND/color" },
+      "imageMode": { "imageTopic": "sim/camera/SIM1-HAND/color" },
       "foxglovePanelTitle": "SIM1-HAND"
     },
     "Image!sim2hand": {
-      "imageMode": { "imageTopic": "theia/camera/SIM2-HAND/color" },
+      "imageMode": { "imageTopic": "sim/camera/SIM2-HAND/color" },
       "foxglovePanelTitle": "SIM2-HAND"
     },
     "Plot!conveyors": {
       "foxglovePanelTitle": "Conveyor speeds",
       "paths": [
-        { "value": "theia/plc/state_conveyors.Conveyors[:].Speed", "enabled": true, "timestampMethod": "receiveTime" }
+        { "value": "sim/plc/state_conveyors.Conveyors[:].Speed", "enabled": true, "timestampMethod": "receiveTime" }
       ]
     },
     "Plot!joints": {
       "foxglovePanelTitle": "Arm joints (deg)",
       "paths": [
-        { "value": "theia/robot/arm1/position_status.joint_degrees[:]", "enabled": true, "timestampMethod": "receiveTime" },
-        { "value": "theia/robot/arm2/position_status.joint_degrees[:]", "enabled": true, "timestampMethod": "receiveTime" }
+        { "value": "sim/robot/arm1/position_status.joint_degrees[:]", "enabled": true, "timestampMethod": "receiveTime" },
+        { "value": "sim/robot/arm2/position_status.joint_degrees[:]", "enabled": true, "timestampMethod": "receiveTime" }
       ]
     },
     "StateTransitions!phases": {

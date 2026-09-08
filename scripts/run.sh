@@ -4,7 +4,7 @@
 # Usage:
 #   DISPLAY=:0 bash scripts/run.sh
 #
-# Requires the protobuf Python bindings already generated (see gen_proto.sh)
+# Requires the protobuf Python bindings already generated (see proto/gen_proto.sh)
 # at /tmp/proto_gen, and eclipse-zenoh installed into Isaac Sim's bundled
 # python (required for camera publishing) - run scripts/setup.sh for both.
 # See the top-level README's "Setup" section.

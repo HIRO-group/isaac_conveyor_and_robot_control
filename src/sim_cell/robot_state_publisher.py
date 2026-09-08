@@ -51,8 +51,8 @@ class RobotStateZenohPublisher:
     conveyor_indexing.mcap_recorder already writes to MCAP.
     """
 
-    ARM_TOPICS: ClassVar[dict] = {1: "theia/robot/arm1/position_status", 2: "theia/robot/arm2/position_status"}
-    CONVEYOR_TOPIC = "theia/plc/state_conveyors"
+    ARM_TOPICS: ClassVar[dict] = {1: "sim/robot/arm1/position_status", 2: "sim/robot/arm2/position_status"}
+    CONVEYOR_TOPIC = "sim/plc/state_conveyors"
 
     def __init__(self) -> None:
         self._session = _open_session()

@@ -1,9 +1,10 @@
 """Single place the generated protobuf bindings are imported from.
 
 Depends on ``plc_connector_pb2`` / ``sim_conveyor_action_pb2`` / (``common.``)
-``types_pb2``, generated from theia's real proto (see the top-level README's
-"Setup" section for the generation step) and made importable via
-``PYTHONPATH`` (see ``scripts/run.sh``) - not via a relative/package import,
+``types_pb2``, generated from an external fixed-schema proto (see
+``proto/gen_proto.sh`` and the top-level README's "Setup" section for the
+generation step) and made importable via ``PYTHONPATH`` (see
+``scripts/run.sh``) - not via a relative/package import,
 since these are flat top-level module names off the generated output
 directory, not part of this package.
 """

@@ -1,25 +1,20 @@
 """Per-tick parquet logger for the conveyor indexing sim.
 
-Schema mirrors theia's real data collection layout (see
-``~/theia/data_collection/src/data_collection_vol2.py``): binary protobuf
-columns, written in background-thread batches so the sim control loop never
-blocks on I/O.
+Binary protobuf columns, written in background-thread batches so the sim
+control loop never blocks on I/O.
 
 Columns:
   tick                 int64    control-loop tick counter, monotonic per run
   sim_time_s           double   elapsed sim time in seconds
   plc_state_conveyors  binary   plc_connector_pb2.StateConveyors bytes -
-                                one StateConveyors_ConveyorsItem per zone,
-                                same message theia's real PLC connector
-                                publishes on theia/plc/v1/state/Conveyors
+                                one StateConveyors_ConveyorsItem per zone
   conveyor_commands    binary   sim_conveyor_action_pb2.SimConveyorCommands
                                 bytes - one SimConveyorCommand per zone
 
 This is intentionally NOT wired to a live Zenoh session (see this
-directory's README for why) - it's a standalone parquet file, schema-
-compatible with production so it can be merged with real collected data
-later, or replayed through the same tooling (test_collected_data_parquet.py)
-once plc_connector_pb2 bindings are on PYTHONPATH.
+directory's README for why) - it's a standalone parquet file that can be
+replayed through the same tooling (test_collected_data_parquet.py) once
+plc_connector_pb2 bindings are on PYTHONPATH.
 """
 
 from __future__ import annotations

@@ -1,12 +1,9 @@
-"""Publishes camera frames on theia's wire contract over Zenoh - see the
-top-level README's "Design" section for the exact contract and why this is
-a local mirror rather than a theia dependency.
+"""Publishes camera frames on this repo's own wire contract over Zenoh - see
+the top-level README's "Design" section for the exact contract.
 
-Session setup deliberately mirrors theia's own collector
-(`~/theia/data_collection/src/data_collection_vol2.py`, read-only reference,
-not imported): `ZENOH_ROUTER` env var set -> connect to that endpoint; unset
--> open in peer mode, so this sim runs standalone (no router needed) as well
-as alongside a real theia deployment.
+Session setup: `ZENOH_ROUTER` env var set -> connect to that endpoint;
+unset -> open in peer mode, so this sim runs standalone (no router needed)
+as well as alongside an external collector.
 """
 
 from __future__ import annotations
@@ -49,17 +46,17 @@ class CameraZenohPublisher:
     attachment.
     """
 
-    LIST_KEY = "theia/camera/list"
+    LIST_KEY = "sim/camera/list"
 
     def __init__(self, camera_list: camera.CameraList) -> None:
         self._session = _open_session()
         self._frame_counter = FrameCounter()
         self._list_bytes = camera_list.SerializeToString()
 
-        # Latched publisher + queryable on the same key: theia's Python
-        # collector does a one-shot session.get() at startup, theia's Rust
-        # recorder queries with a timeout - a plain put() alone only satisfies
-        # subscribers that were already listening, so both are needed.
+        # Latched publisher + queryable on the same key: some consumers do a
+        # one-shot session.get() at startup, others query with a timeout - a
+        # plain put() alone only satisfies subscribers that were already
+        # listening, so both are needed.
         self._list_publisher = self._session.declare_publisher(self.LIST_KEY)
         self._list_publisher.put(self._list_bytes)
         self._list_queryable = self._session.declare_queryable(self.LIST_KEY, self._handle_list_query)
@@ -67,7 +64,7 @@ class CameraZenohPublisher:
         self._color_publishers = {
             info.serial: self._session.declare_publisher(color_topic(info.serial)) for info in camera_list.cameras
         }
-        logger.info("serving theia/camera/list with %d camera(s), publishers ready", len(self._color_publishers))
+        logger.info("serving sim/camera/list with %d camera(s), publishers ready", len(self._color_publishers))
 
     def _handle_list_query(self, query: zenoh.Query) -> None:
         query.reply(self.LIST_KEY, self._list_bytes)

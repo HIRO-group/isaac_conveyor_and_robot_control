@@ -1,7 +1,7 @@
 """30Hz training-data recorder: synchronized camera frames + robot/cell state.
 
-Written for consumption by theia's ``dc_to_lerobot.py`` converter, which reads
-these columns by name (extra columns are tolerated and ignored):
+Written for consumption by an external ``dc_to_lerobot.py`` converter, which
+reads these columns by name (extra columns are tolerated and ignored):
 
   reference_req_id     int64    episode key; the converter starts a new episode
                                 whenever the value changes. The sim writes its
@@ -12,7 +12,8 @@ these columns by name (extra columns are tolerated and ignored):
   observation.state    binary   float32 vector bytes - two 15-float arm blocks
                                 (6 joints rad, suction, 8 cups); conveyor dims
                                 are appended by the converter from
-                                plc_state_conveyors, matching theia's collector
+                                plc_state_conveyors, matching the external
+                                collector's schema
   observation.images   binary   numpy.savez NPZ bytes, one CHW uint8 array per
                                 camera role key (savez uncompressed - parquet
                                 zstd below does the compression)

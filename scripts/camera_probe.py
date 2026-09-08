@@ -1,9 +1,9 @@
 """Standalone verification tool for the camera rig - deliberately does not
-involve theia at all, so the camera contract (src/cameras/) can be checked
-end-to-end on its own.
+involve the rest of the sim at all, so the camera contract (src/cameras/)
+can be checked end-to-end on its own.
 
 Connects to the same Zenoh session the sim publishes on
-(src/cameras/zenoh_publisher.py), fetches `theia/camera/list`, subscribes to
+(src/cameras/zenoh_publisher.py), fetches `sim/camera/list`, subscribes to
 one camera's color topic, and dumps the next frame to a PPM file (zero
 image-library dependencies) for visual inspection.
 
@@ -14,7 +14,7 @@ ZENOH_ROUTER-unset default):
     PYTHONPATH=/tmp/proto_gen python3 scripts/camera_probe.py [--serial SIM1-PICK] [--out FILE.ppm]
 
 Requires `eclipse-zenoh` (see scripts/setup.sh) and the generated
-`sim_camera_pb2` bindings on PYTHONPATH (see gen_proto.sh).
+`sim_camera_pb2` bindings on PYTHONPATH (see proto/gen_proto.sh).
 """
 
 from __future__ import annotations
@@ -35,19 +35,19 @@ try:
     import sim_camera_pb2 as camera
 except ImportError:
     sys.exit(
-        "sim_camera_pb2 not importable - generate it first (bash gen_proto.sh) and put it on "
+        "sim_camera_pb2 not importable - generate it first (bash proto/gen_proto.sh) and put it on "
         "PYTHONPATH, e.g.: PYTHONPATH=/tmp/proto_gen python3 scripts/camera_probe.py"
     )
 
-LIST_KEY = "theia/camera/list"
+LIST_KEY = "sim/camera/list"
 LIST_QUERY_TIMEOUT_S = 5.0
 FRAME_WAIT_TIMEOUT_S = 5.0
 
 
 def _payload_bytes(sample) -> bytes | None:
-    """Mirrors theia's own payload-extraction helper (see
-    ~/theia/data_collection/src/data_collection_vol2.py, read-only reference,
-    not imported) so this probe's success is a faithful stand-in for theia's.
+    """Mirrors the sim's own payload-extraction helper (see
+    src/cameras/zenoh_publisher.py) so this probe's success is a faithful
+    stand-in for a real subscriber's.
     """
     payload = getattr(sample, "payload", None)
     if payload is None:
@@ -88,9 +88,9 @@ def main() -> None:
         camera_list = fetch_camera_list(session)
         cameras = list(camera_list.cameras)
         if not cameras:
-            sys.exit("theia/camera/list replied with zero cameras")
+            sys.exit("sim/camera/list replied with zero cameras")
 
-        print(f"{len(cameras)} camera(s) on theia/camera/list:")
+        print(f"{len(cameras)} camera(s) on sim/camera/list:")
         for info in cameras:
             role_name = camera.CameraRole.Name(info.role)
             print(f"  {info.serial}: {info.width}x{info.height}@{info.fps} {info.format} role={role_name}")

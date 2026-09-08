@@ -179,7 +179,7 @@ def build_box_states(
 class EpisodeTracker:
     """Cell-wide int64 episode key: +1 whenever either arm starts a new pick
     (WAITING -> anything edge). This is the recording's default segmentation;
-    theia-side conversion can re-segment from the recorded phase/sim-time
+    downstream conversion can re-segment from the recorded phase/sim-time
     columns instead. Call update() every physics step so no edge is missed
     between 30Hz recorded rows.
     """

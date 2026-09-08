@@ -29,7 +29,7 @@ from sim_cell.stage_setup.truck import despawn_boxes_in_truck
 
 # Suction on + all 8 cups on - the sim's magic attach has no per-cup
 # actuation, so this always toggles as one block (see sim_cell.recording's
-# module docstring). Matches theia's real dio_blocks[0] bit layout: 0x10000 =
+# module docstring). Matches the real dio_blocks[0] bit layout: 0x10000 =
 # suction, low byte = cup mask.
 _DIO_HOLDING = 0x10000 | 0xFF
 _DIO_EMPTY = 0
@@ -221,7 +221,7 @@ def run(simulation_app) -> None:
                         2, np.degrees(cell.robot2.get_dof_positions().numpy()[0]), holding_2
                     )
                     # Images + state sampled in the same iteration = the synchronized
-                    # training rows theia's converter expects. Skipped while annotators
+                    # training rows the downstream converter expects. Skipped while annotators
                     # are still warming up (partial frames) or before the first control
                     # tick has serialized conveyor state.
                     if recorder is not None and latest_plc_bytes is not None and frames.keys() == recorder.expected_serials:
@@ -272,7 +272,7 @@ def run(simulation_app) -> None:
                         #
                         # state_msg's items were already populated by step() from its own
                         # autonomous decision, before this override - re-point Speed at what
-                        # actually got commanded so theia/plc/state_conveyors (the "actual
+                        # actually got commanded so sim/plc/state_conveyors (the "actual
                         # state" telemetry an external observer sees) doesn't silently report
                         # stale autonomous values while external_action owns the real belt.
                         items_by_name = {item.Name: item for item in state_msg.Conveyors}

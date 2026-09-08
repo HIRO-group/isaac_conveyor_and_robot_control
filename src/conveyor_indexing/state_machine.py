@@ -1,9 +1,9 @@
 """Per-zone conveyor indexing state machine.
 
 Implements a best-effort "happy path" subset of the real
-``ConveyorStateMachineCode`` enum (see
-``~/theia/proto/plc-connector/plc-connector.proto``). Only the states needed
-to move a single item through a zone under normal conditions are implemented:
+``ConveyorStateMachineCode`` enum (see ``proto/gen_proto.sh`` for where its
+schema comes from). Only the states needed to move a single item through a
+zone under normal conditions are implemented:
 
     EMPTY -> READY_TO_RECEIVE -> WAITING_TO_INDUCT -> INDUCTING
           -> IDLE (holding, occupied, downstream busy)
@@ -18,16 +18,16 @@ The exception/reject states (WAITING_TO_REJECT, REJECT_SINGLE, REJECT_STUCK,
 REJECT_FULL, REJECT_SPUR, SHIFTED_ITEM, PLACE_UNEXPECTED_ITEM, PURGE,
 AWAITING_DECISION, CLEAR_FOR_PLACE, READY_FOR_PLACEMENT) are NOT implemented.
 Their real transition conditions live in the physical PLC's ladder logic,
-which isn't available in this repo - ~/theia/docs/PLC/UDT.md doesn't even
-document the `Machine` field, and ~/theia/proto/plc-connector/plc-connector.proto
-leaves `Conveyor_Fault` marked "pending definition". Guessing at those
-transitions here would bake fabricated behavior into training data whose
-whole point is to reflect real indexing decisions - see
-``_handle_exception_states`` below, which is an explicit, never-called stub
-for that future work.
+which isn't available in this repo - the external UDT docs don't even
+document the `Machine` field, and the plc-connector proto itself leaves
+`Conveyor_Fault` marked "pending definition". Guessing at those transitions
+here would bake fabricated behavior into training data whose whole point is
+to reflect real indexing decisions - see ``_handle_exception_states`` below,
+which is an explicit, never-called stub for that future work.
 
 This module depends on ``conveyor_indexing.protos``, itself generated from
-theia's real proto (see the top-level README for the generation step).
+an external fixed-schema proto (see the top-level README for the generation
+step).
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from conveyor_indexing.protos import plc
 
 Machine = plc.ConveyorStateMachineCode
 
-# Convention per ~/theia/docs/PLC/UDT.md `Conveyor_Direction`. The wire field
+# Convention per the external UDT docs' `Conveyor_Direction`. The wire field
 # itself is a raw sint32 (see plc-connector.proto), not a proto enum.
 DIRECTION_UNDEFINED = 0
 DIRECTION_FORWARD = 1

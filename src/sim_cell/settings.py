@@ -38,8 +38,7 @@ PEDESTAL_HEIGHT = 1.6
 PLACE_XY = (-3.0, 2.1857)  # ConveyorTrack_09's belt-top Y center
 
 # Camera rig tuning (see src/cameras/, sim_cell.camera_layout). 640x480@30 RGB8
-# matches theia's production default camera config (~theia/infra/etcd/bootstrap/
-# seed/defaults.json's camera.config.default), so sim data looks like real data.
+
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 CAMERA_FPS = 30

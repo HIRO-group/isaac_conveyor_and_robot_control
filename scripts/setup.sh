@@ -10,11 +10,11 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-bash "$REPO/gen_proto.sh"
+bash "$REPO/proto/gen_proto.sh"
 
-# Pinned to match theia's own pin (~theia/data_collection/requirements.txt) -
-# coincidental alignment, not a dependency: this keeps the wire/API version
-# this sim publishes with in step with what theia's collectors expect.
+# Pinned to match the version downstream consumers of this sim's published
+# data expect - keeps the wire/API version this sim publishes with in step
+# with the rest of the data pipeline.
 /home/ubuntu/IsaacSim/python.sh -m pip install eclipse-zenoh==1.7.1
 
 # Not bundled by Isaac Sim's launcher python by default; cameras.rig falls
