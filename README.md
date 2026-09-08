@@ -59,10 +59,8 @@ Useful environment variables:
 ## Running a trained policy in closed loop
 
 `CONVEYOR_INDEXING_EXTERNAL_ACTION=1` hands both arms + all 5 conveyor zones
-to an external controller (e.g. a trained LeRobot checkpoint via theia's
-`services/sim_bridge`) over Zenoh instead of the autonomous cuMotion/PackML
-control - see `services/sim_bridge/README.md` in a sibling `theia` checkout
-for the full wire contract (topics/message schemas). Nothing moves until a
+to an external controller (e.g. a trained LeRobot checkpoint) over Zenoh instead of the autonomous cuMotion/PackML
+control. Nothing moves until a
 real command arrives on that bus; there is no autonomous fallback while this
 mode is on.
 
@@ -106,8 +104,7 @@ way to guarantee no stale state carries over.
 ## Local data collection
 
 `scripts/collect_local.py` (stock `python3`, stdlib only) runs a headless
-MCAP-recording sim and streams each closed `.mcap` file to
-`gs://por-theia-1/data_collection/sim/<run_id>/instance_00/mcap/`, deleting
+MCAP-recording sim and streams each closed `.mcap` file to the cloud, deleting
 local copies after a verified upload so multi-hour runs never fill the disk:
 
 ```bash
