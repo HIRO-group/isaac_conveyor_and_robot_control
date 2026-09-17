@@ -103,7 +103,7 @@ def test_control_channel_round_trip():
     chan = ControlChannel(ControlMode.AUTONOMOUS)
     client = zenoh.open(zenoh.Config())
     try:
-        time.sleep(0.3)
+        time.sleep(0.8)  # peer discovery
         req = json.dumps({"op": "set_mode", "mode": "external"}).encode()
         replies = list(client.get(chan.topics.control, payload=req, timeout=5.0))
         assert replies
