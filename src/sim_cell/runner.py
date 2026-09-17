@@ -17,6 +17,7 @@ from conveyor_indexing.telemetry import resolve_override_speed_direction
 from pick_and_place import apply_suction_edge
 from sim_cell import layout, settings
 from sim_cell.cell import build_cell
+from sim_cell.control import ControlChannel, ControlMode, ModeController
 from sim_cell.debug import dump_tick_debug
 from sim_cell.pick_dispatch import evaluate_pick_station
 from sim_cell.recording import (
@@ -150,45 +151,26 @@ def run(simulation_app) -> None:
             "image+state pairs, so with no frames captured it would silently record nothing."
         )
 
-    external_action = os.environ.get(EXTERNAL_ACTION_ENV_VAR) == "1"
-    # CONVEYOR_INDEXING_RECORD (30Hz episode/parquet recorder) still conflicts -
-    # episode segmentation has no defined meaning once an external controller
-    # owns the phase machine. CONVEYOR_INDEXING_RECORD_MCAP no longer does:
-    # it's needed for on-policy eval recording (see the on-policy action-log
-    # channels below); phase-transition recording is simply skipped instead
-    # (the phase machine is dormant in external_action mode - see below).
-    validate_external_action_recording(external_action, recorder is not None)
-    # This arm's currently-held box path (None if not holding) while
-    # external_action is set - MagicAttachPickPlace.holding_box/held_box_path
-    # are frozen (forward() never runs), so external mode tracks its own
-    # equivalent via pick_and_place.apply_suction_edge.
-    held_box_path_1 = None
-    held_box_path_2 = None
+    initial_mode = ControlMode.EXTERNAL if os.environ.get(EXTERNAL_ACTION_ENV_VAR) == "1" else ControlMode.AUTONOMOUS
+    # The 30Hz episode recorder's segmentation is meaningless under an external controller.
+    validate_external_action_recording(initial_mode is ControlMode.EXTERNAL, recorder is not None)
 
-    if external_action:
-        # cell.py registers each hold zone's overflow-readiness check against
-        # pick_place.phase_name == "WAITING" (see build_cell) - correct for the
-        # autonomous controller, but phase_name is frozen at its WAITING default
-        # here (forward() is never called in this branch, same reason
-        # holding_box is frozen above), so that check is permanently True. A
-        # permanently-True "robot ready" means the zone permanently treats
-        # itself as holding for this arm and NEVER overflows a box to the next
-        # station's zone downstream, regardless of real activity - confirmed
-        # against a real 270s recording where a box settled at the hold zone's
-        # stop point and never advanced. Re-register both hold zones' checks
-        # against the same live held_box_path_N signal already used for
-        # holding_1/holding_2 above, so "ready" correctly means "not currently
-        # holding a box" instead of an autonomous state that never updates.
-        arm_holding_externally = {1: False, 2: False}
-        cell.loop1.set_hold_zone_ready_check(layout.PICK_ZONE_INDEX, lambda: not arm_holding_externally[1])
-        cell.loop1.set_hold_zone_ready_check(layout.PICK_ZONE_INDEX_2, lambda: not arm_holding_externally[2])
-        # The external client owns every belt. step() keeps computing its
-        # decision (occupancy/PackML bookkeeping the arm box-lookup needs) but
-        # must not touch the physics - its "hold" zeroed the surface velocity
-        # under the external override every tick (2026-09-09, see
-        # line_controller.step).
-        cell.loop1.apply_belt_commands = False
-        cell.loop2.apply_belt_commands = False
+    def _release(arm: int, held_box_path: str) -> None:
+        pick_place = cell.pick_place if arm == 1 else cell.pick_place_2
+        apply_suction_edge(arm, pick_place, cell.box_rigid_prims, False, held_box_path, None)
+
+    # Who drives the cell; switchable at runtime over sim/control (see sim_cell.control).
+    modes = ModeController(
+        stations={
+            1: (cell.loop1, layout.PICK_ZONE_INDEX, cell.pick_place),
+            2: (cell.loop1, layout.PICK_ZONE_INDEX_2, cell.pick_place_2),
+        },
+        bridge=cell.external_command_bridge,
+        release=_release,
+        mode=initial_mode,
+        block_external=lambda: "episode recorder (CONVEYOR_INDEXING_RECORD=1) is on" if recorder is not None else None,
+    )
+    control = ControlChannel(initial_mode)
 
     camera_role_by_serial = {spec.serial: spec.role for spec in cell.camera_specs}
     box_id_to_variant = {path: variant for variant, paths in cell.pool.paths_by_variant.items() for path in paths}
@@ -267,6 +249,10 @@ def run(simulation_app) -> None:
                 world.step(render=False)
                 sim_time = world.current_time
 
+                pending_mode = control.take_pending()
+                if pending_mode is not None and modes.apply(pending_mode):
+                    control.publish_status(modes.mode, int(sim_time * 1e6))
+
                 # Same shutdown path as SIGTERM/SIGINT below - flushes the recorder(s)
                 # cleanly via the `finally` block instead of exiting mid-frame.
                 if max_sim_seconds is not None and sim_time >= max_sim_seconds:
@@ -276,7 +262,7 @@ def run(simulation_app) -> None:
 
                 # Pick-and-place runs every physics step for smooth convergence; conveyor
                 # indexing runs at the coarser control rate below.
-                if external_action:
+                if modes.external:
                     # Drive both arms directly from the latest externally-supplied command,
                     # bypassing MagicAttachPickPlace's phase state machine entirely (it's
                     # simply never called in this branch, so it stays dormant - no explicit
@@ -289,10 +275,10 @@ def run(simulation_app) -> None:
                             positions=np.asarray(cmd_arm1.joint_targets, dtype=np.float32)
                         )
                         _wake_and_diagnose(cell.robot, 1, tick)
-                        held_box_path_1 = apply_suction_edge(
-                            1, cell.pick_place, cell.box_rigid_prims, cmd_arm1.suction, held_box_path_1, pick_box_path
+                        modes.held[1] = apply_suction_edge(
+                            1, cell.pick_place, cell.box_rigid_prims, cmd_arm1.suction, modes.held[1], pick_box_path
                         )
-                        arm_holding_externally[1] = held_box_path_1 is not None
+                        modes.holding[1] = modes.held[1] is not None
                         if mcap_recorder is not None:
                             mcap_recorder.record_arm_action_command(1, sim_time, cmd_arm1)
                     if cmd_arm2 is not None:
@@ -300,11 +286,11 @@ def run(simulation_app) -> None:
                             positions=np.asarray(cmd_arm2.joint_targets, dtype=np.float32)
                         )
                         _wake_and_diagnose(cell.robot2, 2, tick)
-                        held_box_path_2 = apply_suction_edge(
-                            2, cell.pick_place_2, cell.box_rigid_prims, cmd_arm2.suction, held_box_path_2,
+                        modes.held[2] = apply_suction_edge(
+                            2, cell.pick_place_2, cell.box_rigid_prims, cmd_arm2.suction, modes.held[2],
                             pick_box_path_2,
                         )
-                        arm_holding_externally[2] = held_box_path_2 is not None
+                        modes.holding[2] = modes.held[2] is not None
                         if mcap_recorder is not None:
                             mcap_recorder.record_arm_action_command(2, sim_time, cmd_arm2)
                 else:
@@ -322,7 +308,7 @@ def run(simulation_app) -> None:
                 # forward() never runs there (see the external_action branch
                 # above), so phase_name never changes from WAITING - recording
                 # transitions would be meaningless, not just unchanging.
-                if mcap_recorder is not None and not external_action:
+                if mcap_recorder is not None and not modes.external:
                     phase_1 = cell.pick_place.phase_name
                     if phase_1 != prev_phase_1:
                         mcap_recorder.record_phase_transition(
@@ -390,8 +376,8 @@ def run(simulation_app) -> None:
 
                 if sim_time - last_control_time >= control_period_s:
                     # In external-action mode the phase machine is dormant; holding comes from the suction edge.
-                    holding_1 = held_box_path_1 is not None if external_action else cell.pick_place.holding_box
-                    holding_2 = held_box_path_2 is not None if external_action else cell.pick_place_2.holding_box
+                    holding_1 = modes.held[1] is not None if modes.external else cell.pick_place.holding_box
+                    holding_2 = modes.held[2] is not None if modes.external else cell.pick_place_2.holding_box
                     # One batched pose read for every box, reused below by
                     # ConveyorLineController.step, despawn_boxes_in_truck, and
                     # evaluate_pick_station - instead of each of them calling
@@ -405,7 +391,7 @@ def run(simulation_app) -> None:
                     box_orientations = dict(zip(cell.box_paths_ordered, orientations.numpy()))
                     box_linear_vel = {}
                     box_angular_vel = {}
-                    if mcap_recorder is not None or external_action:
+                    if mcap_recorder is not None or modes.external:
                         # Velocity needs its own PhysX sync (get_velocities()). MCAP
                         # recording always pays it. External-action mode pays it too
                         # (2026-09-09): the live BoxStates publish is the external
@@ -424,7 +410,7 @@ def run(simulation_app) -> None:
                     commands_msg = sim_action.SimConveyorCommands()
                     cell.loop1.step(state_msg, commands_msg, box_positions)
                     cell.loop2.step(state_msg, commands_msg, box_positions)
-                    if external_action:
+                    if modes.external:
                         # The state machine's own decision, before the override
                         # below re-points the telemetry at the external command.
                         cell.robot_state_publisher.publish_autonomous_decision(commands_msg)
@@ -480,7 +466,7 @@ def run(simulation_app) -> None:
                     # though the client never released it. That surfaced downstream as a
                     # spurious `dropped_in_transit` (a telemetry/despawn bug, not an
                     # actual grip failure) rather than a real physical drop.
-                    held_box_paths = {p for p in (held_box_path_1, held_box_path_2) if p is not None}
+                    held_box_paths = {p for p in modes.held.values() if p is not None}
                     truck_check_positions = {
                         path: pos for path, pos in box_positions.items() if path not in held_box_paths
                     }
@@ -617,9 +603,9 @@ def run(simulation_app) -> None:
                     # Unconditional now (Stage 5b) - the live box-state publish below
                     # needs held_by_arm too, not just MCAP.
                     holding_1, holding_2, held_by_arm = resolve_arm_telemetry(
-                        external_action,
-                        held_box_path_1,
-                        held_box_path_2,
+                        modes.external,
+                        modes.held[1],
+                        modes.held[2],
                         cell.pick_place.holding_box,
                         cell.pick_place_2.holding_box,
                         cell.pick_place.held_box_path,
@@ -639,6 +625,7 @@ def run(simulation_app) -> None:
                         wall_now = time.monotonic()
                         realtime_factor = (sim_time - last_clock_sim_s) / max(wall_now - last_clock_wall_s, 1e-9)
                         cell.robot_state_publisher.publish_clock(int(sim_time * 1e6), realtime_factor)
+                        control.publish_status(modes.mode, int(sim_time * 1e6), realtime_factor=realtime_factor)
                         last_clock_sim_s, last_clock_wall_s = sim_time, wall_now
                     # Live flange pose, both arms, every tick, any control mode -
                     # the same read the MCAP block below records, now also on
@@ -711,6 +698,7 @@ def run(simulation_app) -> None:
         cell.tick_logger.close()
         cell.camera_publisher.close()
         cell.robot_state_publisher.close()
+        control.close()
         if cell.external_command_bridge is not None:
             cell.external_command_bridge.close()
         simulation_app.close()

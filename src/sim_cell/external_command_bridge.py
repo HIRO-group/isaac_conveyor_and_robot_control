@@ -76,6 +76,13 @@ class ExternalCommandBridge:
         with self._lock:
             self._latest_conveyors = msg
 
+    def reset(self) -> None:
+        """Forget cached commands so a stale one never drives a freshly entered external mode."""
+        with self._lock:
+            for arm in self._latest_arm:
+                self._latest_arm[arm] = None
+            self._latest_conveyors = None
+
     def latest(self):
         """(arm1_cmd, arm2_cmd, conveyor_cmds); any may be None before its first message."""
         with self._lock:

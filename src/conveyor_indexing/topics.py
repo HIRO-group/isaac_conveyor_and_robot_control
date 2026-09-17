@@ -62,6 +62,15 @@ class Topics:
     def run_metadata(self) -> str:
         return f"{self.prefix}/run_metadata"
 
+    @property
+    def status(self) -> str:
+        return f"{self.prefix}/status"
+
+    # control (queryable + subscriber on the sim)
+    @property
+    def control(self) -> str:
+        return f"{self.prefix}/control"
+
     # commands (subscribed by the sim)
     def arm_action(self, arm: int) -> str:
         return f"{self.prefix}/arm/{arm}/action_command"

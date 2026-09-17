@@ -193,6 +193,16 @@ class MagicAttachPickPlace:
             self._holding_box = False
             self._phase = Phase.STAGE_FOR_PLACE
 
+    def reset(self) -> None:
+        """Abandon the current cycle: drop a held box and return to WAITING."""
+        if self._holding_box:
+            detach_box(self._attach_joint_path)
+        self._holding_box = False
+        self.box = None
+        self._box_path = None
+        self._pick_point = None
+        self._phase = Phase.WAITING
+
     @property
     def wrist_link_path(self) -> str:
         """USD path of the wrist link the box attaches to - see attachment.attach_box.

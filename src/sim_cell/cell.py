@@ -56,7 +56,7 @@ class Cell:
     camera_specs: list[CameraSpec]
     camera_publisher: CameraZenohPublisher
     robot_state_publisher: RobotStateZenohPublisher
-    external_command_bridge: ExternalCommandBridge | None
+    external_command_bridge: ExternalCommandBridge
     episode_recorder: EpisodeRecorder | None
     mcap_recorder: McapRecorder | None
     box_rigid_prims: dict
@@ -198,10 +198,8 @@ def build_cell(stage_prep: StagePrep) -> Cell:
     # Always-on, like camera_publisher - lets an external observer watch arm/conveyor
     # state even while the sim runs autonomously (CONVEYOR_INDEXING_EXTERNAL_ACTION unset).
     robot_state_publisher = RobotStateZenohPublisher()
-    # Only opened in external-control mode - zero extra Zenoh session otherwise.
-    external_command_bridge = (
-        ExternalCommandBridge() if os.environ.get("CONVEYOR_INDEXING_EXTERNAL_ACTION") == "1" else None
-    )
+    # Always on: the control mode can switch to external at runtime (sim_cell.control).
+    external_command_bridge = ExternalCommandBridge()
     maybe_enable_camera_tuning(stage, camera_specs)
     episode_recorder = maybe_build_recorder(camera_specs)
 
