@@ -15,6 +15,13 @@ from cameras.protos import camera
 # top-level README's "Design" section).
 COLOR_FORMAT = "RGB8"
 
+# Scene-package role names -> wire enum.
+ROLE_BY_NAME = {
+    "pick_cam": camera.CameraRole.CAMERA_ROLE_PICK_CAM,
+    "place_cam": camera.CameraRole.CAMERA_ROLE_PLACE_CAM,
+    "hand_cam": camera.CameraRole.CAMERA_ROLE_HAND_CAM,
+}
+
 
 def color_topic(serial: str) -> str:
     """theia's listening namespace for this camera's color stream - a key

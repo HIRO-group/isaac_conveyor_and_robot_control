@@ -30,6 +30,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SRC_DIR = _REPO_ROOT / "src"
 _SCRIPTS_DIR = _REPO_ROOT / "scripts"
 _PROTO_GEN_DIR = Path(os.environ.get("CONVEYOR_INDEXING_PROTO_GEN_DIR", "/tmp/proto_gen"))
+# Tests use the fixture scene package unless one is given.
+os.environ.setdefault("SIM_SCENE_DIR", str(_REPO_ROOT / "tests" / "fixtures" / "scene"))
 
 for path in (_SRC_DIR, _SCRIPTS_DIR):
     path_str = str(path)

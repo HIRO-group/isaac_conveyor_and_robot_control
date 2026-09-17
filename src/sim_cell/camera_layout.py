@@ -1,102 +1,68 @@
-"""Derives this cell's 6 camera placements (pick_cam/place_cam/hand_cam x 2
-stations) from actual zone/robot geometry, the same way `robot_placement.py`
-derives station 2's robot position - not hardcoded, since `ConveyorTrack_02`/
-`_10` aren't guaranteed to line up with station 1's zones.
+"""Camera placements derived from the scene's stations and zone geometry.
 
-Tuned poses saved by the camera-tuning workflow (`sim_cell.camera_tuning`)
-always take priority over these derived defaults - see `build_camera_specs`.
+Tuned poses from the scene's pose file always override the derived defaults.
 """
 
 from __future__ import annotations
 
 from cameras.pose_io import load_pose_overrides
-from cameras.protos import camera
-from cameras.specs import CameraSpec
+from cameras.specs import ROLE_BY_NAME, CameraSpec
 from conveyor_indexing.belt_geometry import compute_belt_bounds
-from sim_cell import layout, settings
+from sim_cell.scene import CameraConfig, SceneConfig, StationConfig, get_scene
 
 
-def _pick_cam_spec(serial: str, zone, prim_path: str) -> CameraSpec:
+def _overhead_spec(cam: CameraConfig, scene: SceneConfig, zone) -> CameraSpec:
     bounds = compute_belt_bounds(zone.belt_prim)
     return CameraSpec(
-        serial=serial,
-        role=camera.CameraRole.CAMERA_ROLE_PICK_CAM,
-        prim_path=prim_path,
+        serial=cam.id,
+        role=ROLE_BY_NAME[cam.role],
+        prim_path=f"{scene.camera_root_path}/{cam.id.replace('-', '_')}",
         parent_path=None,
-        translate=(
-            bounds.bbox_center[0],
-            bounds.bbox_center[1],
-            bounds.belt_top_z + settings.CAMERA_HEIGHT_ABOVE_BELT_M,
-        ),
-        rotation_euler_xyz_deg=(0.0, 0.0, 0.0),  # Z-up stage: unrotated camera already looks straight down.
-        width=settings.CAMERA_WIDTH,
-        height=settings.CAMERA_HEIGHT,
-        fps=settings.CAMERA_FPS,
+        translate=(bounds.bbox_center[0], bounds.bbox_center[1], bounds.belt_top_z + scene.camera.height_above_belt_m),
+        rotation_euler_xyz_deg=(0.0, 0.0, 0.0),  # Z-up stage: an unrotated camera looks straight down.
+        width=scene.camera.width,
+        height=scene.camera.height,
+        fps=scene.camera.fps,
+        focal_length=scene.camera.focal_length_mm,
     )
 
 
-def _place_cam_spec(serial: str, zone, prim_path: str) -> CameraSpec:
-    bounds = compute_belt_bounds(zone.belt_prim)
+def _hand_spec(cam: CameraConfig, scene: SceneConfig, station: StationConfig) -> CameraSpec:
     return CameraSpec(
-        serial=serial,
-        role=camera.CameraRole.CAMERA_ROLE_PLACE_CAM,
-        prim_path=prim_path,
-        parent_path=None,
-        translate=(
-            bounds.bbox_center[0],
-            bounds.bbox_center[1],
-            bounds.belt_top_z + settings.CAMERA_HEIGHT_ABOVE_BELT_M,
-        ),
-        rotation_euler_xyz_deg=(0.0, 0.0, 0.0),
-        width=settings.CAMERA_WIDTH,
-        height=settings.CAMERA_HEIGHT,
-        fps=settings.CAMERA_FPS,
+        serial=cam.id,
+        role=ROLE_BY_NAME[cam.role],
+        prim_path=f"{station.hand_cam_parent}/hand_cam",
+        parent_path=station.hand_cam_parent,
+        translate=scene.camera.hand_cam_offset,
+        rotation_euler_xyz_deg=(180.0, 0.0, 0.0),  # look along the flange's +Z
+        width=scene.camera.width,
+        height=scene.camera.height,
+        fps=scene.camera.fps,
+        focal_length=scene.camera.focal_length_mm,
     )
 
 
-def _hand_cam_spec(serial: str, parent_path: str) -> CameraSpec:
-    return CameraSpec(
-        serial=serial,
-        role=camera.CameraRole.CAMERA_ROLE_HAND_CAM,
-        prim_path=parent_path + "/hand_cam",
-        parent_path=parent_path,
-        translate=settings.HAND_CAM_OFFSET,
-        # Local -Z (the camera's look direction) aligned with the flange's
-        # outward +Z, so the camera looks where the tool points. Verify via
-        # the camera-tuning workflow's live viewport and adjust/save if the
-        # image shows sky instead of the tool - see sim_cell.camera_tuning.
-        rotation_euler_xyz_deg=(180.0, 0.0, 0.0),
-        width=settings.CAMERA_WIDTH,
-        height=settings.CAMERA_HEIGHT,
-        fps=settings.CAMERA_FPS,
-    )
+def build_camera_specs(loops, scene: SceneConfig | None = None) -> list[CameraSpec]:
+    """One spec per scene camera. `loops` are the built line controllers, in scene order."""
+    scene = scene or get_scene()
+    specs = []
+    for cam in scene.cameras:
+        station = scene.stations[cam.station - 1]
+        if cam.role == "pick_cam":
+            ref = station.pick_zone
+            specs.append(_overhead_spec(cam, scene, loops[ref.loop].zones[ref.zone]))
+        elif cam.role == "place_cam":
+            ref = station.place_zone
+            specs.append(_overhead_spec(cam, scene, loops[ref.loop].zones[ref.zone]))
+        elif cam.role == "hand_cam":
+            specs.append(_hand_spec(cam, scene, station))
+        else:
+            raise ValueError(f"camera {cam.id}: unknown role {cam.role!r}")
+    return _apply_pose_overrides(specs, str(scene.camera_poses_path))
 
 
-def build_camera_specs(loop1, loop2) -> list[CameraSpec]:
-    """Six specs: {pick,place,hand}_cam x {station 1, station 2}. Both pick
-    zones live on loop1, both place zones on loop2 - see sim_cell.cell.
-    """
-    specs = [
-        _pick_cam_spec("SIM1-PICK", loop1.zones[layout.PICK_ZONE_INDEX], layout.CAMERA_ROOT_PATH + "/SIM1_PICK"),
-        _place_cam_spec("SIM1-PLACE", loop2.zones[layout.PLACE_ZONE_INDEX], layout.CAMERA_ROOT_PATH + "/SIM1_PLACE"),
-        _hand_cam_spec("SIM1-HAND", layout.HAND_CAM_PARENT),
-        _pick_cam_spec(
-            "SIM2-PICK", loop1.zones[layout.PICK_ZONE_INDEX_2], layout.CAMERA_ROOT_PATH + "/SIM2_PICK"
-        ),
-        _place_cam_spec(
-            "SIM2-PLACE", loop2.zones[layout.PLACE_ZONE_INDEX_2], layout.CAMERA_ROOT_PATH + "/SIM2_PLACE"
-        ),
-        _hand_cam_spec("SIM2-HAND", layout.HAND_CAM_PARENT_2),
-    ]
-    return _apply_pose_overrides(specs)
-
-
-def _apply_pose_overrides(specs: list[CameraSpec]) -> list[CameraSpec]:
-    """Saved/tuned poses (see cameras.camera_tuning) always win over the
-    derived defaults above - a fresh checkout with no pose file yet just
-    uses the defaults untouched.
-    """
-    overrides = load_pose_overrides(layout.CAMERA_POSES_PATH)
+def _apply_pose_overrides(specs: list[CameraSpec], poses_path: str) -> list[CameraSpec]:
+    overrides = load_pose_overrides(poses_path)
     if not overrides:
         return specs
     tuned = []

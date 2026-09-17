@@ -1,87 +1,38 @@
-"""Everything specific to `5_conv_env.usd`'s prim layout: two independent open
-(non-looping) lines - loop 1 runs along Y=0, loop 2 along Y~2.186. Loop 2's
-far end sits at the near wall of SteelBoxTruck_A01_01; boxes run off the belt
-there and drop into the truck bed rather than handing off to another zone.
+"""Prim-layout view of the loaded scene (`sim_cell.scene`).
+
+Module-level names are kept for the Isaac-side callers; the values come from
+the scene package. New code should read `get_scene()` directly.
 """
 
 from __future__ import annotations
 
-import os
+from sim_cell.scene import get_scene
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# 5_conv_env_empty.usd is 5_conv_env.usd with every CubeBox_* prim stripped out -
-# sim_cell.stage_setup.box_pool authors a fresh pool of boxes into it instead, so
-# sim_cell.box_spawner can randomize what's on ConveyorTrack run to run.
-STAGE_PATH = os.path.join(REPO_ROOT, "environments", "5_conv_env_empty.usd")
+_scene = get_scene()
+_scene.require_shape(loops=2, stations=2)
 
-ZONE_NODE_PATHS_LOOP1 = [
-    "/World/ConveyorTrack/ConveyorBeltGraph/ConveyorNode",
-    "/World/ConveyorTrack_01/ConveyorBeltGraph/ConveyorNode",
-    "/World/ConveyorTrack_02/ConveyorBeltGraph/ConveyorNode",
-]
-ZONE_NODE_PATHS_LOOP2 = [
-    "/World/ConveyorTrack_09/ConveyorBeltGraph/ConveyorNode",
-    "/World/ConveyorTrack_10/ConveyorBeltGraph/ConveyorNode",
-]
+STAGE_PATH = str(_scene.stage_path)
+CAMERA_POSES_PATH = str(_scene.camera_poses_path)
 
-# ConveyorTrack_01/_09 face each other at local X=-3 - the natural spot for a fixed
-# pick/place robot. ConveyorTrack_02 (X=-5) is out of a UR20's reach from there, so
-# it's left as an unused upstream buffer.
-PICK_ZONE_INDEX = 1  # ConveyorTrack_01 within ZONE_NODE_PATHS_LOOP1
-PLACE_ZONE_INDEX = 0  # ConveyorTrack_09 within ZONE_NODE_PATHS_LOOP2
+ZONE_NODE_PATHS_LOOP1 = list(_scene.loops[0].zones)
+ZONE_NODE_PATHS_LOOP2 = list(_scene.loops[1].zones)
 
-# Second pick/place station, one zone further downstream on each loop - see
-# ConveyorLineController.set_hold_zone_ready_check for overflow between them.
-PICK_ZONE_INDEX_2 = 2  # ConveyorTrack_02 within ZONE_NODE_PATHS_LOOP1
-PLACE_ZONE_INDEX_2 = 1  # ConveyorTrack_10 within ZONE_NODE_PATHS_LOOP2
+_station_1, _station_2 = _scene.stations
+PICK_ZONE_INDEX = _station_1.pick_zone.zone
+PLACE_ZONE_INDEX = _station_1.place_zone.zone
+PICK_ZONE_INDEX_2 = _station_2.pick_zone.zone
+PLACE_ZONE_INDEX_2 = _station_2.place_zone.zone
 
-ROBOT_PATH = "/World/PickPlaceRobot"
-PEDESTAL_PATH = "/World/PickPlacePedestal"
-ROBOT_PATH_2 = "/World/PickPlaceRobot_02"
-PEDESTAL_PATH_2 = "/World/PickPlacePedestal_02"
-TRUCK_PATH = "/World/SteelBoxTruck_A01_01"
+ROBOT_PATH = _station_1.robot_path
+PEDESTAL_PATH = _station_1.pedestal_path
+ROBOT_PATH_2 = _station_2.robot_path
+PEDESTAL_PATH_2 = _station_2.pedestal_path
+HAND_CAM_PARENT = _station_1.hand_cam_parent
+HAND_CAM_PARENT_2 = _station_2.hand_cam_parent
 
-# Grouping scope for the overhead (pick_cam/place_cam) camera prims - world
-# frame, since it has no authored transform of its own (see cameras.rig).
-CAMERA_ROOT_PATH = "/World/Cameras"
-
-# UR20 has no `tool0` prim in the bundled asset - only this Xform under
-# wrist_3_link (see robot_configs/generate_ur20_urdf.py, which derives a
-# tool0 frame from this prim's actual authored transform for the URDF
-# export). Hand cams are parented here so they ride the arm's kinematics.
-HAND_CAM_PARENT = ROBOT_PATH + "/wrist_3_link/flange"
-HAND_CAM_PARENT_2 = ROBOT_PATH_2 + "/wrist_3_link/flange"
-
-# Tuned camera transforms, saved by the camera-tuning workflow (see
-# sim_cell.camera_tuning) - committed to git, next to the USD it annotates.
-CAMERA_POSES_PATH = os.path.join(REPO_ROOT, "environments", "camera_poses.json")
-
-# The ground plane's collider breaks cuMotion's obstacle scan (recursion bug in
-# pick_and_place's np.reshape shim); excluded via extra_exclude_obstacle_paths instead.
-GROUND_PLANE_COLLISION_PATH = "/World/GroundPlane/CollisionPlane"
-
-# sim_cell.stage_setup.box_pool authors a pool of CubeBox_* prims (parked, physics
-# disabled) into the box-less 5_conv_env_empty.usd at prep time; discovered here the
-# same way the original pre-placed pallet was (sim_cell.stage_setup.boxes.
-# discover_box_prim_paths) and given physics by apply_box_physics. sim_cell.box_spawner
-# then teleports/re-enables pool prims onto ConveyorTrack at runtime.
-BOX_PRIM_NAME_PREFIX = "CubeBox_"
-
-CONVEYOR_TRACK_ROOTS = (
-    "/World/ConveyorTrack",
-    "/World/ConveyorTrack_01",
-    "/World/ConveyorTrack_02",
-    "/World/ConveyorTrack_09",
-    "/World/ConveyorTrack_10",
-)
-
-# Any occupancy hit whose prim path falls under one of these roots is belt/
-# structure/robot/truck geometry, not a transported item, and is excluded
-# from occupancy detection.
-EXCLUDED_STRUCTURE_ROOTS = CONVEYOR_TRACK_ROOTS + (
-    ROBOT_PATH,
-    PEDESTAL_PATH,
-    ROBOT_PATH_2,
-    PEDESTAL_PATH_2,
-    TRUCK_PATH,
-)
+TRUCK_PATH = _scene.truck_path
+CAMERA_ROOT_PATH = _scene.camera_root_path
+GROUND_PLANE_COLLISION_PATH = _scene.ground_plane_collision_path
+BOX_PRIM_NAME_PREFIX = _scene.box_prim_name_prefix
+CONVEYOR_TRACK_ROOTS = _scene.conveyor_track_roots
+EXCLUDED_STRUCTURE_ROOTS = _scene.excluded_structure_roots

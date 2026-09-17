@@ -186,7 +186,7 @@ def build_cell(stage_prep: StagePrep) -> Cell:
     # under the flange) need the referenced robot geometry already in place.
     # Missing eclipse-zenoh (see cameras.zenoh_publisher) fails here, before
     # the main loop, rather than mid-run.
-    camera_specs = build_camera_specs(loop1, loop2)
+    camera_specs = build_camera_specs([loop1, loop2])
     camera_rig = CameraRig(stage, camera_specs)
     camera_publisher = CameraZenohPublisher(build_camera_list(camera_specs))
     # Always-on, like camera_publisher - lets an external observer watch arm/conveyor

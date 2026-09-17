@@ -1,0 +1,63 @@
+# Test fixture: a two-loop, two-station cell. No USD; only the config is exercised.
+stage: 5_conv_env_empty.usd
+camera_poses: camera_poses.json
+
+loops:
+  - zones:
+      - /World/ConveyorTrack/ConveyorBeltGraph/ConveyorNode
+      - /World/ConveyorTrack_01/ConveyorBeltGraph/ConveyorNode
+      - /World/ConveyorTrack_02/ConveyorBeltGraph/ConveyorNode
+    run_speed_pct: 55
+  - zones:
+      - /World/ConveyorTrack_09/ConveyorBeltGraph/ConveyorNode
+      - /World/ConveyorTrack_10/ConveyorBeltGraph/ConveyorNode
+    run_speed_pct: 50
+
+stations:
+  - robot_path: /World/PickPlaceRobot
+    pedestal_path: /World/PickPlacePedestal
+    hand_cam_parent: /World/PickPlaceRobot/wrist_3_link/flange
+    pick_zone: [0, 1]
+    place_zone: [1, 0]
+  - robot_path: /World/PickPlaceRobot_02
+    pedestal_path: /World/PickPlacePedestal_02
+    hand_cam_parent: /World/PickPlaceRobot_02/wrist_3_link/flange
+    pick_zone: [0, 2]
+    place_zone: [1, 1]
+
+cameras:
+  - {id: SIM1-PICK, role: pick_cam, station: 1}
+  - {id: SIM1-PLACE, role: place_cam, station: 1}
+  - {id: SIM1-HAND, role: hand_cam, station: 1}
+  - {id: SIM2-PICK, role: pick_cam, station: 2}
+  - {id: SIM2-PLACE, role: place_cam, station: 2}
+  - {id: SIM2-HAND, role: hand_cam, station: 2}
+
+camera:
+  width: 640
+  height: 480
+  fps: 30
+  height_above_belt_m: 2.5
+  hand_cam_offset: [0.0, 0.0, 0.10]
+  focal_length_mm: 18.0
+
+robot:
+  position: [-3.0, 1.0928, 0.0]
+  pedestal_height: 1.6
+  place_xy: [-3.0, 2.1857]
+
+thresholds:
+  floor_z: 0.24
+  off_belt_z: 1.40
+  off_belt_truck_xy_margin_m: 0.5
+
+truck_path: /World/SteelBoxTruck_A01_01
+camera_root_path: /World/Cameras
+ground_plane_collision_path: /World/GroundPlane/CollisionPlane
+box_prim_name_prefix: CubeBox_
+conveyor_track_roots:
+  - /World/ConveyorTrack
+  - /World/ConveyorTrack_01
+  - /World/ConveyorTrack_02
+  - /World/ConveyorTrack_09
+  - /World/ConveyorTrack_10

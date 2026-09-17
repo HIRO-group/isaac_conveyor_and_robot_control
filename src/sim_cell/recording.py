@@ -30,6 +30,7 @@ from cameras.protos import camera
 from conveyor_indexing.episode_recorder import EpisodeRecorder
 from conveyor_indexing.mcap_recorder import McapRecorder, git_sha
 from sim_cell import settings
+from sim_cell.scene import get_scene
 
 logger = logging.getLogger(__name__)
 
@@ -78,16 +79,8 @@ _CONTROL_SOURCE_POLICY_UNKNOWN = "policy:unknown"
 # (both already import *this* module, so the reverse import would cycle).
 _EXTERNAL_ACTION_ENV_VAR = "CONVEYOR_INDEXING_EXTERNAL_ACTION"
 
-# Dataset role keys become LeRobot feature names (observation.images.<role>);
-# the _1/_2 suffix distinguishes the two stations for the dual-robot model.
-SERIAL_TO_ROLE = {
-    "SIM1-PICK": "pick_cam_1",
-    "SIM1-PLACE": "place_cam_1",
-    "SIM1-HAND": "hand_cam_1",
-    "SIM2-PICK": "pick_cam_2",
-    "SIM2-PLACE": "place_cam_2",
-    "SIM2-HAND": "hand_cam_2",
-}
+# Camera id -> dataset feature name (observation.images.<role>_<station>).
+SERIAL_TO_ROLE = {cam.id: cam.feature_name for cam in get_scene().cameras}
 
 _STATE_DIMS_PER_ARM = 15  # 6 joints + suction + 8 cups
 _WAITING = "WAITING"
@@ -100,8 +93,7 @@ def maybe_build_recorder(camera_specs) -> EpisodeRecorder | None:
     serials = {spec.serial for spec in camera_specs}
     if serials != set(SERIAL_TO_ROLE):
         raise ValueError(
-            f"camera serials {sorted(serials)} don't match recording roles {sorted(SERIAL_TO_ROLE)} - "
-            "update sim_cell.recording.SERIAL_TO_ROLE alongside sim_cell.camera_layout"
+            f"camera serials {sorted(serials)} don't match the scene's cameras {sorted(SERIAL_TO_ROLE)}"
         )
     logger.info("episode recording enabled -> %s", RECORD_OUTPUT_DIR)
     queue_maxsize_env = os.environ.get("CONVEYOR_INDEXING_RECORD_QUEUE")
