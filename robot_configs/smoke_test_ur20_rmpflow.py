@@ -5,7 +5,7 @@ isolation from the full conveyor scaffold - validates the config before
 wiring it into pick_and_place.py.
 
 Run with:
-    /home/ubuntu/IsaacSim/python.sh /home/ubuntu/conveyor_indexing/robot_configs/smoke_test_ur20_rmpflow.py
+    /home/ggbrisco/isaacsim/_build/linux-x86_64/release/python.sh /home/ggbrisco/isaac_conveyor_and_robot_control/robot_configs/smoke_test_ur20_rmpflow.py
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ from isaacsim.robot_motion.cumotion import CumotionWorldInterface, RmpFlowContro
 
 UR20_USD_PATH = "/Isaac/Robots/UniversalRobots/ur20/ur20.usd"
 ROBOT_PRIM_PATH = "/ur20"
-CONFIG_DIR = "/home/ubuntu/conveyor_indexing/robot_configs/ur20"
+CONFIG_DIR = "/home/ggbrisco/isaac_conveyor_and_robot_control/robot_configs/ur20"
 
 
 def main() -> None:

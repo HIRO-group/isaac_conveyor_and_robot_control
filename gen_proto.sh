@@ -23,7 +23,7 @@
 #     command - sim-only, no real-robot equivalent)
 #
 # Usage:
-#   bash /home/ubuntu/conveyor_indexing/gen_proto.sh
+#   bash /home/ggbrisco/isaac_conveyor_and_robot_control/gen_proto.sh
 #
 # Requires a protoc whose codegen matches the `protobuf` Python package that
 # will import the result (Isaac Sim's bundled python.sh has protobuf 7.35.1
@@ -37,7 +37,7 @@ set -e
 
 PROTOC="python3 -m grpc_tools.protoc"
 PROTO_OUT=/tmp/proto_gen
-THEIA_ROOT=/home/ubuntu/theia
+THEIA_ROOT=/home/ggbrisco/theia
 SIM_PROTO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/proto" && pwd)"
 
 mkdir -p "$PROTO_OUT"
@@ -85,4 +85,4 @@ $PROTOC \
 
 echo "Proto generated at $PROTO_OUT"
 echo "scripts/run.sh already puts $PROTO_OUT on PYTHONPATH - just run:"
-echo "  DISPLAY=:0 bash /home/ubuntu/conveyor_indexing/scripts/run.sh"
+echo "  DISPLAY=:1 bash /home/ggbrisco/isaac_conveyor_and_robot_control/scripts/run.sh"

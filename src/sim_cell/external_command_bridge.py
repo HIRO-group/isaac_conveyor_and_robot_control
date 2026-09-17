@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 import threading
 from typing import ClassVar
 
@@ -43,7 +44,7 @@ except ImportError as exc:
     raise SystemExit(
         "eclipse-zenoh is required for CONVEYOR_INDEXING_EXTERNAL_ACTION mode but is not "
         "installed in this interpreter. Install it into Isaac Sim's bundled python:\n"
-        "  /home/ubuntu/IsaacSim/python.sh -m pip install eclipse-zenoh==1.7.1\n"
+        "  /home/ggbrisco/isaacsim/_build/linux-x86_64/release/python.sh -m pip install eclipse-zenoh==1.7.1\n"
         "(or run scripts/setup.sh, which does this for you - see the "
         "top-level README's 'Setup' section)."
     ) from exc
@@ -73,6 +74,13 @@ class ExternalCommandBridge:
 
     ARM_TOPICS: ClassVar[dict] = {1: "sim/arm/1/action_command", 2: "sim/arm/2/action_command"}
     CONVEYOR_TOPIC = "sim/conveyor/command"
+    # Box placement commands (2026-09-10, decision trials): JSON, one object
+    # per message, queued in arrival order and drained once per tick by the
+    # runner:  {"op": "auto", "enabled": false}   pause/resume automatic waves
+    #          {"op": "clear"}                     despawn every box not held
+    #          {"op": "spawn", "x": .., "y": .., "yaw": 0.0, "variant": "..."|null}
+    # A "seq" field, if given, is echoed in the runner's log line.
+    BOX_TOPIC = "sim/boxes/command"
 
     def __init__(self) -> None:
         self._session = _open_session()
@@ -85,9 +93,29 @@ class ExternalCommandBridge:
             for arm, topic in self.ARM_TOPICS.items()
         }
         self._conveyor_sub = self._session.declare_subscriber(self.CONVEYOR_TOPIC, self._on_conveyors)
+        self._box_commands: list = []
+        self._box_sub = self._session.declare_subscriber(self.BOX_TOPIC, self._on_box_command)
         logger.info(
-            "external-command subscribers ready: %s, %s", list(self.ARM_TOPICS.values()), self.CONVEYOR_TOPIC
+            "external-command subscribers ready: %s, %s, %s", list(self.ARM_TOPICS.values()), self.CONVEYOR_TOPIC, self.BOX_TOPIC
         )
+
+    def _on_box_command(self, sample) -> None:
+        try:
+            cmd = json.loads(_payload_bytes(sample).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as e:
+            logger.warning("box command: bad payload (%s)", e)
+            return
+        if not isinstance(cmd, dict) or cmd.get("op") not in ("auto", "clear", "spawn"):
+            logger.warning("box command: unknown %r", cmd)
+            return
+        with self._lock:
+            self._box_commands.append(cmd)
+
+    def drain_box_commands(self) -> list:
+        """All box commands received since the last drain, in arrival order."""
+        with self._lock:
+            out, self._box_commands = self._box_commands, []
+        return out
 
     def _make_arm_handler(self, arm: int):
         def _on_sample(sample) -> None:
@@ -126,5 +154,6 @@ class ExternalCommandBridge:
         for sub in self._arm_subs.values():
             sub.undeclare()
         self._conveyor_sub.undeclare()
+        self._box_sub.undeclare()
         self._session.close()
         logger.info("external-command Zenoh session closed")

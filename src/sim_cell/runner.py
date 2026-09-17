@@ -28,7 +28,12 @@ from sim_cell.recording import (
     validate_external_action_recording,
 )
 from sim_cell.stage_setup import prepare_stage
-from sim_cell.stage_setup.truck import despawn_boxes_below_floor, despawn_boxes_in_truck, despawn_stale_boxes
+from sim_cell.stage_setup.truck import (
+    despawn_boxes_below_floor,
+    despawn_boxes_in_truck,
+    despawn_boxes_off_belt,
+    despawn_stale_boxes,
+)
 
 # Suction on + all 8 cups on - the sim's magic attach has no per-cup
 # actuation, so this always toggles as one block (see sim_cell.recording's
@@ -56,6 +61,21 @@ EXTERNAL_ACTION_ENV_VAR = "CONVEYOR_INDEXING_EXTERNAL_ACTION"
 # recording stopped entirely, for a task that only needs position_status,
 # not camera frames.
 RECORD_MCAP_CAMERAS_ENV_VAR = "CONVEYOR_INDEXING_RECORD_MCAP_CAMERAS"
+
+# Skip camera work entirely (render products, GPU capture, and the Zenoh
+# frame publish) - default "1", i.e. unchanged behavior. Distinct from
+# RECORD_MCAP_CAMERAS, which only skips WRITING frames to MCAP while still
+# paying for the render and capture. For a collection run whose dataset is
+# built purely from joint/box/conveyor state, that render is the single
+# largest per-frame cost and buys nothing: the loop is already unthrottled
+# (world.step in a tight while, no real-time pacing), so this is the main
+# lever for getting sim time per wall-clock second up.
+#
+# The 30Hz arm-state publish shares this block and is NOT skipped - an
+# external-action client polls it for live pose (see
+# sim_cell.robot_state_publisher / the collectors' get_live_pose_rad), so
+# dropping it would break external control outright.
+CAMERAS_ENV_VAR = "CONVEYOR_INDEXING_CAMERAS"
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +149,12 @@ def run(simulation_app) -> None:
     # `recorder` above - either, both, or neither can be enabled.
     mcap_recorder = cell.mcap_recorder
     record_mcap_cameras = os.environ.get(RECORD_MCAP_CAMERAS_ENV_VAR, "1") == "1"
+    cameras_enabled = os.environ.get(CAMERAS_ENV_VAR, "1") == "1"
+    if not cameras_enabled and recorder is not None:
+        raise SystemExit(
+            f"{CAMERAS_ENV_VAR}=0 is incompatible with CONVEYOR_INDEXING_RECORD: that recorder's rows are "
+            "image+state pairs, so with no frames captured it would silently record nothing."
+        )
 
     external_action = os.environ.get(EXTERNAL_ACTION_ENV_VAR) == "1"
     # CONVEYOR_INDEXING_RECORD (30Hz episode/parquet recorder) still conflicts -
@@ -162,6 +188,13 @@ def run(simulation_app) -> None:
         arm_holding_externally = {1: False, 2: False}
         cell.loop1.set_hold_zone_ready_check(layout.PICK_ZONE_INDEX, lambda: not arm_holding_externally[1])
         cell.loop1.set_hold_zone_ready_check(layout.PICK_ZONE_INDEX_2, lambda: not arm_holding_externally[2])
+        # The external client owns every belt. step() keeps computing its
+        # decision (occupancy/PackML bookkeeping the arm box-lookup needs) but
+        # must not touch the physics - its "hold" zeroed the surface velocity
+        # under the external override every tick (2026-09-09, see
+        # line_controller.step).
+        cell.loop1.apply_belt_commands = False
+        cell.loop2.apply_belt_commands = False
 
     camera_role_by_serial = {spec.serial: spec.role for spec in cell.camera_specs}
     box_id_to_variant = {path: variant for variant, paths in cell.pool.paths_by_variant.items() for path in paths}
@@ -189,7 +222,11 @@ def run(simulation_app) -> None:
     # well above a real end-to-end pick+place cycle's typical duration
     # (observed ~10-20s/example when a box is found promptly) so a working
     # pipeline never triggers this - see despawn_stale_boxes's own docstring.
-    STALE_BOX_MAX_AGE_S = 90.0
+    # Overridable (2026-09-09): a policy evaluation runs short trials with
+    # long between-trial waits, so boxes legitimately sit on the belt far
+    # longer than in a collection run and were being removed right after a
+    # release. Held boxes are always exempt (see stale_check_positions).
+    STALE_BOX_MAX_AGE_S = float(os.environ.get("CONVEYOR_INDEXING_STALE_BOX_MAX_AGE_S", "90.0"))
     prev_phase_1 = cell.pick_place.phase_name
     prev_phase_2 = cell.pick_place_2.phase_name
 
@@ -305,9 +342,22 @@ def run(simulation_app) -> None:
                 # SimulationContext.render(), which disables playSimulations for the
                 # duration of its app.update() call.
                 if sim_time - last_camera_time >= camera_period_s:
-                    world.render()
                     capture_ts_us = now_us()
-                    frames = cell.camera_rig.capture_all()
+                    # CONVEYOR_INDEXING_CAMERAS=0 skips the render/capture/publish
+                    # entirely (the dominant per-frame cost) while leaving this
+                    # block's 30Hz arm-state publish below intact - see
+                    # CAMERAS_ENV_VAR. `frames` stays an empty dict, which the
+                    # frame-consuming recorder branch below already guards on.
+                    # world.render() is NOT optional and NOT purely visual: it
+                    # calls app.update(), which is what evaluates OmniGraph -
+                    # and the belts are driven by OgnIsaacConveyor inside each
+                    # ConveyorBeltGraph. Skipping it stops every conveyor dead
+                    # (measured 2026-09-09: boxes moved +0.000m across a full
+                    # 120 sim-second run, 0 truck deliveries, while the sim
+                    # "ran" at 2.9x realtime doing nothing). Only the GPU
+                    # capture and frame publish are genuinely optional.
+                    world.render()
+                    frames = cell.camera_rig.capture_all() if cameras_enabled else {}
                     for serial, rgb_bytes in frames.items():
                         cell.camera_publisher.publish_frame(serial, rgb_bytes, capture_ts_us)
                         if mcap_recorder is not None and record_mcap_cameras:
@@ -365,11 +415,17 @@ def run(simulation_app) -> None:
                     box_orientations = dict(zip(cell.box_paths_ordered, orientations.numpy()))
                     box_linear_vel = {}
                     box_angular_vel = {}
-                    if mcap_recorder is not None:
-                        # Velocity needs its own PhysX sync (get_velocities()) - a real added
-                        # cost only MCAP recording pays; a live-only box-state publish doesn't
-                        # need velocity (build_box_states' own .get(path, _ZERO_VEC) fallback
-                        # covers the empty-dict case for a non-MCAP run).
+                    if mcap_recorder is not None or external_action:
+                        # Velocity needs its own PhysX sync (get_velocities()). MCAP
+                        # recording always pays it. External-action mode pays it too
+                        # (2026-09-09): the live BoxStates publish is the external
+                        # client's only view of the belts, and without this branch it
+                        # carried a hard-coded 0.0 velocity for every box (the
+                        # _ZERO_VEC fallback in build_box_states) - so a client that
+                        # selects "settled" boxes, or measures whether a commanded
+                        # belt is actually moving, was reading a constant, not the
+                        # world. That is exactly how the scripted belt check reported
+                        # 0.0 m/s under a 55 % command that was in fact running.
                         linear_vel, angular_vel = cell.box_positions_view.get_velocities()
                         box_linear_vel = dict(zip(cell.box_paths_ordered, linear_vel.numpy()))
                         box_angular_vel = dict(zip(cell.box_paths_ordered, angular_vel.numpy()))
@@ -379,6 +435,9 @@ def run(simulation_app) -> None:
                     cell.loop1.step(state_msg, commands_msg, box_positions)
                     cell.loop2.step(state_msg, commands_msg, box_positions)
                     if external_action:
+                        # The state machine's own decision, before the override
+                        # below re-points the telemetry at the external command.
+                        cell.robot_state_publisher.publish_autonomous_decision(commands_msg)
                         # Let step() run as normal first - it also drives occupancy/PackML
                         # bookkeeping that evaluate_pick_station() depends on for the arm
                         # box-lookup above, so skipping it would silently break arm control
@@ -462,6 +521,20 @@ def run(simulation_app) -> None:
                         floor_check_positions,
                         settings.FLOOR_Z_THRESHOLD,
                     )
+                    # 2026-09-10: a box already falling off a belt anywhere but
+                    # into the truck vanishes now, not after the floor bounce
+                    # (see despawn_boxes_off_belt). Same age gate and
+                    # held-box exclusion as the floor check; a box the floor
+                    # check just caught is not checked again.
+                    off_belt_box_paths = despawn_boxes_off_belt(
+                        cell.box_rigid_prims,
+                        {p: pos for p, pos in floor_check_positions.items() if p not in grounded_box_paths},
+                        settings.OFF_BELT_Z_THRESHOLD,
+                        cell.truck_bed_min,
+                        cell.truck_bed_max,
+                        settings.OFF_BELT_TRUCK_XY_MARGIN_M,
+                    )
+                    grounded_box_paths = grounded_box_paths + off_belt_box_paths
                     stale_check_positions = {
                         path: pos for path, pos in box_positions.items() if path not in held_box_paths
                     }
@@ -492,7 +565,38 @@ def run(simulation_app) -> None:
                     # just emptied out - reuses the occupancy loop1.step already
                     # computed this tick.
                     cell.spawner.release(despawned_box_paths)
-                    spawned = cell.spawner.update(sim_time, cell.loop1.occupied[0])
+                    # Scripted placement (2026-09-10, decision trials): drain
+                    # this tick's box commands from the external client - pause
+                    # or resume the automatic waves, clear every box not held,
+                    # or place one box at an exact world pose. Cleared boxes get
+                    # a DESPAWNED event and go back to the pool; placed boxes
+                    # join `spawned` below and get the same SPAWNED bookkeeping
+                    # a wave does.
+                    spawned = []
+                    if cell.external_command_bridge is not None:
+                        for cmd in cell.external_command_bridge.drain_box_commands():
+                            op = cmd.get("op")
+                            if op == "auto":
+                                cell.spawner.auto_waves = bool(cmd.get("enabled", True))
+                                logger.info("box command seq=%s: automatic waves %s", cmd.get("seq"), "on" if cell.spawner.auto_waves else "off")
+                            elif op == "clear":
+                                to_clear = [p for p in active_box_paths if p not in held_box_paths]
+                                for path in cell.spawner.despawn(to_clear):
+                                    if mcap_recorder is not None:
+                                        mcap_recorder.record_box_event(
+                                            sim_time, BOX_EVENT_DESPAWNED, path, box_id_to_variant.get(path, ""),
+                                            tuple(box_positions[path]), tuple(box_orientations[path]),
+                                        )
+                                    active_box_paths.discard(path)
+                                    box_first_seen_time.pop(path, None)
+                                logger.info("box command seq=%s: cleared %d box(es)", cmd.get("seq"), len(to_clear))
+                            elif op == "spawn":
+                                spawned.extend(cell.spawner.spawn_at(
+                                    sim_time, float(cmd["x"]), float(cmd["y"]), float(cmd.get("yaw", 0.0)), cmd.get("variant"),
+                                ))
+                                logger.info("box command seq=%s: spawn at (%.2f, %.2f) -> %s", cmd.get("seq"), float(cmd["x"]), float(cmd["y"]),
+                                            [s[0] for s in spawned])
+                    spawned = spawned + cell.spawner.update(sim_time, cell.loop1.occupied[0])
                     for path, variant, position, quat_wxyz in spawned:
                         if mcap_recorder is not None:
                             mcap_recorder.record_box_event(
@@ -539,6 +643,14 @@ def run(simulation_app) -> None:
                         held_by_arm,
                     )
                     cell.robot_state_publisher.publish_box_states(sim_time, box_states, truck_deliveries_count)
+                    # Live flange pose, both arms, every tick, any control mode -
+                    # the same read the MCAP block below records, now also on
+                    # the wire so an external policy can measure the exact
+                    # distance the attach gate measures (2026-09-09).
+                    tool_pos_1, tool_quat_1 = cell.pick_place.tool_world_pose()
+                    tool_pos_2, tool_quat_2 = cell.pick_place_2.tool_world_pose()
+                    cell.robot_state_publisher.publish_tool_pose(1, sim_time, tool_pos_1, tool_quat_1)
+                    cell.robot_state_publisher.publish_tool_pose(2, sim_time, tool_pos_2, tool_quat_2)
 
                     if mcap_recorder is not None:
                         # Same object, not re-parsed from latest_plc_bytes - state_msg
@@ -556,16 +668,15 @@ def run(simulation_app) -> None:
                             list(np.degrees(cell.robot2.get_dof_positions().numpy()[0])),
                             _DIO_HOLDING if holding_2 else _DIO_EMPTY,
                         )
-                        mcap_recorder.record_box_states(sim_time, box_states)
+                        mcap_recorder.record_box_states(sim_time, box_states, truck_deliveries_count)
                         # Independent of control mode (unlike holding_1/2 above) - the
                         # tool_prim GeomPrim tracks the arm's actual physical
                         # wrist_3_link/flange regardless of whether forward() runs.
                         # Recorded at the same 120Hz cadence as BoxStates/
                         # PositionStatus so FK is never needed downstream (see
                         # pick_and_place.controller.MagicAttachPickPlace.tool_world_pose).
-                        tool_pos_1, tool_quat_1 = cell.pick_place.tool_world_pose()
+                        # tool_pos/quat read once above, for the live publish.
                         mcap_recorder.record_tool_pose(1, sim_time, tuple(tool_pos_1), tuple(tool_quat_1))
-                        tool_pos_2, tool_quat_2 = cell.pick_place_2.tool_world_pose()
                         mcap_recorder.record_tool_pose(2, sim_time, tuple(tool_pos_2), tuple(tool_quat_2))
                     cell.tick_logger.log_tick(
                         tick=tick,

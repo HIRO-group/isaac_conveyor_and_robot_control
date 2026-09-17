@@ -3,14 +3,14 @@ Isaac Sim ur20.usd asset via isaacsim.asset.exporter.urdf.UsdToUrdfConverter.
 
 isaacsim.asset.exporter.urdf / isaacsim.asset.importer.utils /
 isaacsim.robot_setup.xrdf_editor / the `lula` python bindings are not part of
-the runtime Isaac Sim distribution at /home/ubuntu/IsaacSim - they only exist
-in the built extensions under /home/ubuntu/IsaacSim-source's _build output.
+the runtime Isaac Sim distribution at /home/ggbrisco/isaacsim/_build/linux-x86_64/release - they only exist
+in the built extensions under /home/ggbrisco/isaacsim's _build output.
 Run with:
 
     PYTHONPATH=\
-/home/ubuntu/IsaacSim-source/_build/linux-x86_64/release/exts/isaacsim.asset.exporter.urdf:\
-/home/ubuntu/IsaacSim-source/_build/linux-x86_64/release/exts/isaacsim.asset.importer.utils \
-    /home/ubuntu/IsaacSim/python.sh /home/ubuntu/conveyor_indexing/robot_configs/generate_ur20_urdf.py
+/home/ggbrisco/isaacsim/_build/linux-x86_64/release/exts/isaacsim.asset.exporter.urdf:\
+/home/ggbrisco/isaacsim/_build/linux-x86_64/release/exts/isaacsim.asset.importer.utils \
+    /home/ggbrisco/isaacsim/_build/linux-x86_64/release/python.sh /home/ggbrisco/isaac_conveyor_and_robot_control/robot_configs/generate_ur20_urdf.py
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from isaacsim.storage.native import get_assets_root_path
 from isaacsim.asset.exporter.urdf import UsdToUrdfConverter
 
 UR20_USD_PATH = "/Isaac/Robots/UniversalRobots/ur20/ur20.usd"
-OUTPUT_DIR = "/home/ubuntu/conveyor_indexing/robot_configs/ur20"
+OUTPUT_DIR = "/home/ggbrisco/isaac_conveyor_and_robot_control/robot_configs/ur20"
 
 # ur20.usd's tool-mounting frame is an Xform named "flange" nested under
 # wrist_3_link (confirmed by traversing the stage - no "tool0" prim exists in

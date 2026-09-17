@@ -20,12 +20,26 @@ from sim_cell.stage_setup.box_pool import BoxPool
 
 logger = logging.getLogger(__name__)
 
-# ConveyorTrack's belt only fits 4 boxes without overlap under the placement
-# clearance in _spawn_wave (confirmed empirically - a request of 5 clamps to 4
-# on every wave), so 4 is the real ceiling here, not just a safety clamp.
+# ConveyorTrack's belt (2.0 m along travel, 0.9 m across) fits 4 boxes in one
+# row without overlap under the placement clearance in _spawn_wave (confirmed
+# empirically - a request of 5 clamped to 4 on every wave). Waves larger than
+# a row are laid out as a GRID (2026-09-10): a second lane across the belt
+# takes the wave to 8. Each lane is 0.45 m wide against a 0.37 m worst-case
+# diagonal footprint of the 26 cm box, and the single-row lateral jitter
+# already spread boxes across the whole belt width, so two lanes stay inside
+# the lateral distribution every collection was made with.
+#
+# Wave sizes are overridable per run (the evaluation wants a denser supply
+# than the collections used); unset -> the historical 1..4 draw, so recorded
+# seeds replay exactly.
 INITIAL_WAVE_COUNT = 4
 WAVE_COUNT_MIN = 1
 WAVE_COUNT_MAX = 4
+WAVE_MIN_ENV_VAR = "CONVEYOR_INDEXING_WAVE_MIN"
+WAVE_MAX_ENV_VAR = "CONVEYOR_INDEXING_WAVE_MAX"
+# lateral clearance between lanes of a multi-row wave (the along-travel
+# clearance is SPAWN_SLOT_CLEARANCE_M as before)
+LANE_CLEARANCE_M = 0.03
 
 # ConveyorTrack must read empty this long before a new wave spawns - guards
 # against spawning mid-settle, while a box from the previous wave is still
@@ -44,6 +58,32 @@ SPAWN_SLOT_CLEARANCE_M = 0.05
 # Overridable for reproducible training runs; unset -> a fresh random seed
 # each run, logged so any run can be replayed.
 SEED_ENV_VAR = "CONVEYOR_INDEXING_SPAWN_SEED"
+
+
+def wave_bounds_from_env(environ=None) -> tuple[int, int]:
+    """(min, max) boxes per wave: WAVE_MIN_ENV_VAR / WAVE_MAX_ENV_VAR, else the
+    historical 1..4. Validated so a typo cannot silently spawn nothing."""
+    env = os.environ if environ is None else environ
+    lo = int(env.get(WAVE_MIN_ENV_VAR, WAVE_COUNT_MIN))
+    hi = int(env.get(WAVE_MAX_ENV_VAR, WAVE_COUNT_MAX))
+    if lo < 1 or hi < lo:
+        raise ValueError(f"{WAVE_MIN_ENV_VAR}={lo} {WAVE_MAX_ENV_VAR}={hi}: need 1 <= min <= max")
+    return lo, hi
+
+
+def grid_layout(count: int, travel_half_extent: float, lateral_half_extent: float, max_half_diag: float) -> list[int]:
+    """How many boxes go in each lane across the belt for a wave of `count`.
+    One lane holds as many along-travel slots as fit with the placement
+    clearance; more boxes add lanes until the lanes themselves would
+    overlap, at which point the wave is clamped. Returns the per-lane counts
+    (sum <= count); the sum is the number that will actually be spawned."""
+    min_slot_half = max_half_diag + SPAWN_SLOT_CLEARANCE_M
+    per_lane = max(1, int(travel_half_extent // min_slot_half))
+    max_lanes = max(1, int(lateral_half_extent // (max_half_diag + LANE_CLEARANCE_M)))
+    lanes = min(max_lanes, math.ceil(count / per_lane))
+    n = min(count, lanes * per_lane)
+    base, extra = divmod(n, lanes)
+    return [base + (1 if k < extra else 0) for k in range(lanes)]
 
 
 class BoxSpawner:
@@ -72,13 +112,24 @@ class BoxSpawner:
         # the exact seed needed to replay its box waves - see
         # sim_cell.recording.maybe_build_mcap_recorder's RunMetadata.
         self.seed = seed
-        logger.info("box spawner seed=%d (override with %s)", seed, SEED_ENV_VAR)
+        self.wave_min, self.wave_max = wave_bounds_from_env()
+        # The first wave fills one row (the historical 4), but never more than
+        # this run's own ceiling: a "sparse" run (1..1) asking for a 4-box
+        # opening wave is not sparse for its first minute (2026-09-10).
+        self.initial_wave_count = min(max(INITIAL_WAVE_COUNT, self.wave_min), self.wave_max)
+        logger.info("box spawner seed=%d (override with %s); waves of %d..%d box(es) (override with %s/%s)",
+                    seed, SEED_ENV_VAR, self.wave_min, self.wave_max, WAVE_MIN_ENV_VAR, WAVE_MAX_ENV_VAR)
 
         self._empty_since: float | None = None
         self._last_spawn_time: float | None = None
         # Parking is deferred to the first update() call (see its comment) rather
         # than done here in __init__.
         self._parked = False
+        # Scripted placement (2026-09-10, decision trials): an external client
+        # can pause the automatic waves and place / clear boxes itself - see
+        # `spawn_at`, `despawn`, and the "sim/boxes/command" topic in
+        # external_command_bridge.py.
+        self.auto_waves = True
 
     def _park_all_pool_boxes(self) -> None:
         """Disable and hide every pool box - same runtime disable mechanism
@@ -125,10 +176,13 @@ class BoxSpawner:
             self._park_all_pool_boxes()
             self._parked = True
 
+        if not self.auto_waves:
+            return []
+
         if self._last_spawn_time is None:
             # Belt starts empty - spawn the first wave immediately rather than
             # waiting out the debounce.
-            return self._spawn_wave(sim_time, INITIAL_WAVE_COUNT)
+            return self._spawn_wave(sim_time, self.initial_wave_count)
 
         if zone_occupied:
             self._empty_since = None
@@ -143,7 +197,51 @@ class BoxSpawner:
             logger.debug("zone empty but pool exhausted - nothing to spawn")
             return []
 
-        return self._spawn_wave(sim_time, self._rng.randint(WAVE_COUNT_MIN, WAVE_COUNT_MAX))
+        return self._spawn_wave(sim_time, self._rng.randint(self.wave_min, self.wave_max))
+
+    def spawn_at(self, sim_time: float, x: float, y: float, yaw_rad: float = 0.0, variant: str | None = None) -> list:
+        """Place ONE pool box at world (x, y) resting on the belt top, with the
+        given yaw - the decision-trial protocol's exact placement. Returns the
+        same `(path, variant, position, quat_wxyz)` list `update` does (one
+        entry, or empty if the pool has nothing of that variant). Does not
+        touch the wave state, so automatic waves (if enabled) continue as
+        before. Callers normally pause them first (`auto_waves = False`)."""
+        if not self._parked:
+            self._park_all_pool_boxes()
+            self._parked = True
+        if variant is None:
+            in_stock = [v for v, paths in self._available.items() if paths]
+            if not in_stock:
+                logger.warning("spawn_at: pool exhausted")
+                return []
+            variant = self._rng.choice(in_stock)
+        if not self._available.get(variant):
+            logger.warning("spawn_at: no %s left in the pool", variant)
+            return []
+        path = self._available[variant].pop()
+        hz = self._pool.half_extents_by_variant[variant][2]
+        position = (float(x), float(y), self._belt_top_z + hz + SPAWN_DROP_HEIGHT_M)
+        quat_wxyz = (math.cos(yaw_rad / 2.0), 0.0, 0.0, math.sin(yaw_rad / 2.0))
+        self._place(path, position, quat_wxyz)
+        logger.info("spawn_at: %s at (%.2f, %.2f) yaw %.2f at t=%.2f", path, x, y, yaw_rad, sim_time)
+        return [(path, variant, position, quat_wxyz)]
+
+    def despawn(self, box_paths: list) -> list:
+        """Park the given live boxes (same disable/hide/park mechanics as the
+        truck and floor despawns) and return them to the pool. Returns the
+        paths actually parked."""
+        from sim_cell.stage_setup.truck import DESPAWNED_BOX_PARK_POSITION
+        done = []
+        for path in box_paths:
+            rigid_prim = self._box_rigid_prims[path]
+            rigid_prim.set_enabled_rigid_bodies([False])
+            rigid_prim.set_visibilities([False])
+            rigid_prim.set_world_poses(positions=[DESPAWNED_BOX_PARK_POSITION])
+            done.append(path)
+        self.release(done)
+        if done:
+            logger.info("despawned %d box(es) on request", len(done))
+        return done
 
     def _variant_of(self, box_path: str) -> str:
         for variant, paths in self._pool.paths_by_variant.items():
@@ -163,45 +261,53 @@ class BoxSpawner:
 
         variants_in_stock = [v for v, paths in self._available.items() if paths]
         max_half_diag = max(math.hypot(*self._pool.half_extents_by_variant[v][:2]) for v in variants_in_stock)
-        min_slot_half = max_half_diag + SPAWN_SLOT_CLEARANCE_M
         travel_half_extent = self._bbox_half_extent[self._travel_axis]
-        slot_half = travel_half_extent / count
-        if slot_half < min_slot_half:
-            fitting_count = max(1, min(count, int(travel_half_extent // min_slot_half)))
-            logger.warning(
-                "clamped wave from %d to %d box(es) - not enough belt length for non-overlapping slots",
-                count, fitting_count,
-            )
-            count = fitting_count
-            slot_half = travel_half_extent / count
-
         lateral_half_extent = self._bbox_half_extent[self._lateral_axis]
+        lanes = grid_layout(count, travel_half_extent, lateral_half_extent, max_half_diag)
+        if sum(lanes) < count:
+            logger.warning(
+                "clamped wave from %d to %d box(es) - not enough belt for non-overlapping slots (%d lane(s))",
+                count, sum(lanes), len(lanes),
+            )
+            count = sum(lanes)
+        lane_half = lateral_half_extent / len(lanes)
+
         spawned = []
-        for slot_index in range(count):
-            # Recomputed every slot (not just once per wave) - each pop() below
-            # can exhaust a variant partway through a wave.
-            variant = self._rng.choice([v for v, paths in self._available.items() if paths])
-            path = self._available[variant].pop()
-            hx, hy, hz = self._pool.half_extents_by_variant[variant]
-            r = math.hypot(hx, hy)  # worst-case footprint radius at any yaw
+        for lane_index, lane_count in enumerate(lanes):
+            slot_half = travel_half_extent / lane_count
+            # One lane is the historical layout exactly (same slots, same
+            # jitter room, same RNG call order), so recorded seeds replay.
+            if len(lanes) == 1:
+                lane_center = 0.0
+                lateral_room_cap = lateral_half_extent
+            else:
+                lane_center = -lateral_half_extent + lane_half * (2 * lane_index + 1)
+                lateral_room_cap = lane_half - LANE_CLEARANCE_M
+            for slot_index in range(lane_count):
+                # Recomputed every slot (not just once per wave) - each pop() below
+                # can exhaust a variant partway through a wave.
+                variant = self._rng.choice([v for v, paths in self._available.items() if paths])
+                path = self._available[variant].pop()
+                hx, hy, hz = self._pool.half_extents_by_variant[variant]
+                r = math.hypot(hx, hy)  # worst-case footprint radius at any yaw
 
-            slot_center = -travel_half_extent + slot_half * (2 * slot_index + 1)
-            jitter_room = max(0.0, slot_half - r - SPAWN_SLOT_CLEARANCE_M)
-            travel_offset = self._rng.uniform(-jitter_room, jitter_room)
-            lateral_room = max(0.0, lateral_half_extent - r)
-            lateral_offset = self._rng.uniform(-lateral_room, lateral_room)
+                slot_center = -travel_half_extent + slot_half * (2 * slot_index + 1)
+                jitter_room = max(0.0, slot_half - r - SPAWN_SLOT_CLEARANCE_M)
+                travel_offset = self._rng.uniform(-jitter_room, jitter_room)
+                lateral_room = max(0.0, lateral_room_cap - r)
+                lateral_offset = lane_center + self._rng.uniform(-lateral_room, lateral_room)
 
-            position_xyz = [0.0, 0.0, 0.0]
-            position_xyz[self._travel_axis] = self._bbox_center[self._travel_axis] + slot_center + travel_offset
-            position_xyz[self._lateral_axis] = self._bbox_center[self._lateral_axis] + lateral_offset
-            position_xyz[2] = self._belt_top_z + hz + SPAWN_DROP_HEIGHT_M
-            position = (position_xyz[0], position_xyz[1], position_xyz[2])
+                position_xyz = [0.0, 0.0, 0.0]
+                position_xyz[self._travel_axis] = self._bbox_center[self._travel_axis] + slot_center + travel_offset
+                position_xyz[self._lateral_axis] = self._bbox_center[self._lateral_axis] + lateral_offset
+                position_xyz[2] = self._belt_top_z + hz + SPAWN_DROP_HEIGHT_M
+                position = (position_xyz[0], position_xyz[1], position_xyz[2])
 
-            yaw = self._rng.uniform(0.0, 2 * math.pi)
-            quat_wxyz = (math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0))
+                yaw = self._rng.uniform(0.0, 2 * math.pi)
+                quat_wxyz = (math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0))
 
-            self._place(path, position, quat_wxyz)
-            spawned.append((path, variant, position, quat_wxyz))
+                self._place(path, position, quat_wxyz)
+                spawned.append((path, variant, position, quat_wxyz))
 
         self._last_spawn_time = sim_time
         self._empty_since = None

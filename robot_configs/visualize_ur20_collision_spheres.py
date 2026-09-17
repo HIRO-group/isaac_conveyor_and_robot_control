@@ -17,7 +17,7 @@ matches what's actually in robot.xrdf, not raw unfiltered generator output.
 
 Run with (opens a viewer window - not headless, this is for visual
 inspection):
-    /home/ubuntu/IsaacSim/python.sh /home/ubuntu/conveyor_indexing/robot_configs/visualize_ur20_collision_spheres.py
+    /home/ggbrisco/isaacsim/_build/linux-x86_64/release/python.sh /home/ggbrisco/isaac_conveyor_and_robot_control/robot_configs/visualize_ur20_collision_spheres.py
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ import isaacsim.core.experimental.utils.stage as stage_utils
 
 UR20_USD_PATH = "/Isaac/Robots/UniversalRobots/ur20/ur20.usd"
 ROBOT_PRIM_PATH = "/ur20"
-CONFIG_DIR = Path("/home/ubuntu/conveyor_indexing/robot_configs/ur20")
+CONFIG_DIR = Path("/home/ggbrisco/isaac_conveyor_and_robot_control/robot_configs/ur20")
 LULA_SPHERES_DIR = CONFIG_DIR / "lula_spheres"
 
 # Same mapping and filter as generate_ur20_xrdf.py, so this shows exactly

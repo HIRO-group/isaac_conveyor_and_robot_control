@@ -16,8 +16,8 @@ what correctly wires isaacsim.robot_setup's namespace path (a raw PYTHONPATH
 addition alone was tried first and failed - Isaac Sim's `isaacsim` package
 has a fixed, non-namespace __path__, unlike a plain PEP 420 package).
 
-    PYTHONPATH=/home/ubuntu/IsaacSim-source/_build/target-deps/isaac_lula_prebundle \
-    /home/ubuntu/IsaacSim/python.sh /home/ubuntu/conveyor_indexing/robot_configs/generate_ur20_xrdf.py
+    PYTHONPATH=/home/ggbrisco/isaacsim/_build/target-deps/isaac_lula_prebundle \
+    /home/ggbrisco/isaacsim/_build/linux-x86_64/release/python.sh /home/ggbrisco/isaac_conveyor_and_robot_control/robot_configs/generate_ur20_xrdf.py
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from isaacsim.robot_setup.xrdf_editor import EditorState
 
 UR20_USD_PATH = "/Isaac/Robots/UniversalRobots/ur20/ur20.usd"
 ROBOT_PRIM_PATH = "/ur20"
-CONFIG_DIR = Path("/home/ubuntu/conveyor_indexing/robot_configs/ur20")
+CONFIG_DIR = Path("/home/ggbrisco/isaac_conveyor_and_robot_control/robot_configs/ur20")
 LULA_SPHERES_DIR = CONFIG_DIR / "lula_spheres"
 
 ARM_JOINT_NAMES = [

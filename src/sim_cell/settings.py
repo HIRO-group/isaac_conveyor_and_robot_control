@@ -67,6 +67,17 @@ PLACE_XY = (-3.0, 2.1857)  # ConveyorTrack_09's belt-top Y center
 # bed range is not.
 FLOOR_Z_THRESHOLD = 0.24
 
+# Off-belt despawn (2026-09-10, user's call): a box whose centre has dropped
+# this far below belt-top height (1.78) and that is not over the truck bed
+# is already falling off a belt - despawn it immediately instead of after
+# the floor bounce. 1.40 is 0.38 m under the belt top: a 26 cm box tipping
+# over the edge has its centre no lower than ~1.60 while any part of it
+# still touches the belt, so this never catches a box that is still on one.
+# The truck-footprint margin keeps a box dropping into the bed from a
+# slightly-off release on the truck's side.
+OFF_BELT_Z_THRESHOLD = 1.40
+OFF_BELT_TRUCK_XY_MARGIN_M = 0.5
+
 # Camera rig tuning (see src/cameras/, sim_cell.camera_layout). 640x480@30 RGB8
 # matches theia's production default camera config (~theia/infra/etcd/bootstrap/
 # seed/defaults.json's camera.config.default), so sim data looks like real data.

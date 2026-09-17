@@ -12,8 +12,8 @@ after it declared its subscription. Starting this first (and confirming the
 transition is missed. See the top-level README's "Running a trained policy in
 closed loop" section for the full three-step order.
 
-Usage (same PYTHONPATH as scripts/run.sh - see that script/gen_proto.sh):
-  PYTHONPATH=/tmp/proto_gen /home/ubuntu/IsaacSim/python.sh \
+Usage (same PYTHONPATH as scripts/run.sh - see that script and proto/gen_proto.sh):
+  PYTHONPATH=/tmp/proto_gen /home/ggbrisco/isaacsim/_build/linux-x86_64/release/python.sh \
     scripts/monitor_external_action.py
 """
 

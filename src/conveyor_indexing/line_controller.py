@@ -41,6 +41,10 @@ class ConveyorLineController:
         self.machine_states: list = [None] * len(self.zones)
         self._box_rigid_prims: dict | None = None
         self._hold_zone_ready_checks: dict = {}  # zone_index -> ready_fn; absent = always-ready
+        # False in external-action mode: step() still runs the full state
+        # machine for occupancy/PackML bookkeeping, but never writes the belt
+        # (see the comment at the apply_command call in step()).
+        self.apply_belt_commands: bool = True
         fix_zone_directions(self.zones, self.closed_loop)
 
     def set_hold_zone_ready_check(self, zone_index: int, ready_fn) -> None:
@@ -116,7 +120,22 @@ class ConveyorLineController:
                     zone.node_path, self.occupied[i], holding, downstream_clear, at_stop_position,
                     observation.machine, command.run,
                 )
-            zone.apply_command(command.run, command.speed_pct)
+            # In external-action mode the belt is NOT ours to drive: the runner
+            # overrides every zone named in the external command later in the
+            # same tick, and any zone the command does not name must not be
+            # driven by this autonomous decision either (2026-09-09: an
+            # external client sending one message per zone left every zone
+            # but the last one on this state machine - the boxes indexed
+            # "too perfectly" while the command log said the client had them).
+            # Note the OmniGraph conveyor node DOES re-author the surface
+            # velocity after a direct zero (it compares the current attribute
+            # to its target every compute, OgnIsaacConveyor.cpp), so a same-
+            # tick stop-then-run sequence is not itself the problem; ownership
+            # is. Verified 2026-09-09 with scripts/conveyor_physics_check.py:
+            # stop, restart at the same speed, and fractional speeds all track
+            # the external command to within 1 %.
+            if self.apply_belt_commands:
+                zone.apply_command(command.run, command.speed_pct)
             self.machine_states[i] = observation.machine
 
             append_conveyor_state(state_msg, zone, observation, command)

@@ -104,6 +104,43 @@ def despawn_boxes_below_floor(
     return grounded_paths
 
 
+def despawn_boxes_off_belt(
+    box_rigid_prims: dict,
+    box_positions: dict,
+    z_threshold: float,
+    truck_xy_min: tuple,
+    truck_xy_max: tuple,
+    truck_xy_margin_m: float,
+) -> list:
+    """Despawn a box the moment it is clearly falling off a belt (below
+    `z_threshold`, well under belt-top height) and is NOT over the truck bed
+    (its (x, y) outside the bed's footprint widened by `truck_xy_margin_m`)
+    - user's call, 2026-09-10: boxes that ride off the end of the supply line
+    or get knocked off the side should vanish at once rather than bounce on
+    the floor for the ~0.5 s it takes to reach FLOOR_Z_THRESHOLD, mostly for
+    the video. A box dropping into the truck bed passes through the same
+    heights mid-air, so the footprint exclusion keeps despawn_boxes_in_truck
+    the one to catch it (see settings.FLOOR_Z_THRESHOLD's own history for why
+    a bare z gate breaks truck deliveries). Same park mechanics as the other
+    despawns; returns the despawned paths for the spawner to recycle.
+    """
+    falling = []
+    for path, (x, y, z) in box_positions.items():
+        if z >= z_threshold:
+            continue
+        over_truck = (truck_xy_min[0] - truck_xy_margin_m <= x <= truck_xy_max[0] + truck_xy_margin_m
+                      and truck_xy_min[1] - truck_xy_margin_m <= y <= truck_xy_max[1] + truck_xy_margin_m)
+        if not over_truck:
+            falling.append(path)
+    for box_path in falling:
+        rigid_prim = box_rigid_prims[box_path]
+        rigid_prim.set_enabled_rigid_bodies([False])
+        rigid_prim.set_visibilities([False])
+        rigid_prim.set_world_poses(positions=[DESPAWNED_BOX_PARK_POSITION])
+        logger.info("despawned %s - fell off a belt (z < %.2f, not over the truck)", box_path, z_threshold)
+    return falling
+
+
 def despawn_stale_boxes(box_positions: dict, box_ages_s: dict, max_age_s: float, box_rigid_prims: dict) -> list:
     """Disable, hide, and park any box that has been active for longer than
     `max_age_s` without being delivered (despawn_boxes_in_truck) or grounded

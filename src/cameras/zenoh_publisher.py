@@ -26,7 +26,7 @@ except ImportError as exc:
     raise SystemExit(
         "eclipse-zenoh is required for camera publishing but is not installed "
         "in this interpreter. Install it into Isaac Sim's bundled python:\n"
-        "  /home/ubuntu/IsaacSim/python.sh -m pip install eclipse-zenoh==1.7.1\n"
+        "  /home/ggbrisco/isaacsim/_build/linux-x86_64/release/python.sh -m pip install eclipse-zenoh==1.7.1\n"
         "(or run scripts/setup.sh, which does this for you - see the "
         "top-level README's 'Setup' section)."
     ) from exc

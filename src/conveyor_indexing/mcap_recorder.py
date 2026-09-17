@@ -72,7 +72,7 @@ except ImportError as exc:  # pragma: no cover - environment dependent
     raise SystemExit(
         "mcap + mcap-protobuf-support are required for MCAP recording but are not installed "
         "in this interpreter. Install them with:\n"
-        "  /home/ubuntu/IsaacSim/python.sh -m pip install mcap mcap-protobuf-support\n"
+        "  /home/ggbrisco/isaacsim/_build/linux-x86_64/release/python.sh -m pip install mcap mcap-protobuf-support\n"
     ) from exc
 
 import sim_arm_action_pb2
@@ -181,10 +181,19 @@ class McapRecorder:
         # StateConveyors() every control tick and never mutates this one again.
         self._enqueue("theia/plc/state_conveyors", state_msg, sim_time_s)
 
-    def record_box_states(self, sim_time_s: float, boxes: list) -> None:
+    def record_box_states(self, sim_time_s: float, boxes: list, truck_deliveries_count: int = 0) -> None:
         """``boxes``: list of sim_state_pb2.BoxState (built by the caller -
-        see sim_cell.recording.build_box_states)."""
-        msg = sim_state_pb2.BoxStates(sim_time_s=sim_time_s, boxes=boxes)
+        see sim_cell.recording.build_box_states). ``truck_deliveries_count``
+        (added - was missing here even though the live
+        ``robot_state_publisher.publish_box_states`` counterpart already
+        takes and threads it through; the caller's own running total was
+        silently dropped on the MCAP path, so every post-hoc reader of
+        `sim/boxes/state` alone saw a permanent 0, unable to tell a genuine
+        truck delivery apart from a floor/stale despawn from this channel
+        alone - exactly the ambiguity `BoxStates.truck_deliveries_count`
+        exists to resolve, see sim_state.proto's own comment on that field).
+        """
+        msg = sim_state_pb2.BoxStates(sim_time_s=sim_time_s, boxes=boxes, truck_deliveries_count=truck_deliveries_count)
         self._enqueue("sim/boxes/state", msg, sim_time_s)
 
     def record_box_event(

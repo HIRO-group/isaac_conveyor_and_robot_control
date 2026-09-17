@@ -64,21 +64,42 @@ def apply_suction_edge(arm: int, pick_place, box_rigid_prims: dict, suction: boo
     currently_holding = held_box_path is not None
 
     if suction and not currently_holding:
-        if candidate_box_path is None:
-            logger.warning("arm%d: suction commanded with no candidate box in range; ignoring", arm)
+        # Attach whatever box is actually UNDER THE TOOL, not the zone's
+        # ranked candidate (2026-09-09 fix). `candidate_box_path` comes from
+        # pick_dispatch.evaluate_pick_station, which returns the box nearest
+        # THE ROBOT among those occupying the pick zone. An external client
+        # commits to one box and then spends seconds driving to it, during
+        # which a different box can become "nearest" - most often for arm 2,
+        # whose zone is downstream and accumulates a queue. The proximity
+        # check then measured tool -> some OTHER box and rejected a grab whose
+        # tool was visibly touching its real target: live misses came back
+        # quantized at box spacing (0.41 / 0.62 / 1.13 / 2.37m, each clustered
+        # to ~1mm across hundreds of samples - a static mismatch, not motion),
+        # and arm 2 collapsed to 12% success while arm 1 ran at 89%.
+        #
+        # Ranking by distance to the tool makes the check measure the thing it
+        # is actually gating: is the suction cup on a box? The tight
+        # EXTERNAL_ATTACH_MAX_DISTANCE gate is what keeps this honest - only a
+        # box essentially at the cup qualifies, so this cannot silently grab
+        # something across the cell.
+        tool_position = pick_place.tool_world_position()
+        nearest_path, nearest_box, nearest_distance = None, None, None
+        for box_path, box_prim in box_rigid_prims.items():
+            pick_point = box_top_center(box_prim, measure_box_half_height(box_path))
+            candidate_distance = float(np.linalg.norm(tool_position - pick_point))
+            if nearest_distance is None or candidate_distance < nearest_distance:
+                nearest_path, nearest_box, nearest_distance = box_path, box_prim, candidate_distance
+        if nearest_path is None:
+            logger.warning("arm%d: suction commanded with no box in the scene at all; ignoring", arm)
             return held_box_path
-        box = box_rigid_prims[candidate_box_path]
-        half_height = measure_box_half_height(candidate_box_path)
-        pick_point = box_top_center(box, half_height)
-        distance = float(np.linalg.norm(pick_place.tool_world_position() - pick_point))
-        if distance > EXTERNAL_ATTACH_MAX_DISTANCE:
+        if nearest_distance > EXTERNAL_ATTACH_MAX_DISTANCE:
             logger.warning(
-                "arm%d: suction commanded %.4fm from box %s (max %.4fm); ignoring",
-                arm, distance, candidate_box_path, EXTERNAL_ATTACH_MAX_DISTANCE,
+                "arm%d: suction commanded %.4fm from nearest box %s (max %.4fm, zone candidate was %s); ignoring",
+                arm, nearest_distance, nearest_path, EXTERNAL_ATTACH_MAX_DISTANCE, candidate_box_path,
             )
             return held_box_path
-        attach_box(box, pick_place.wrist_link_path, pick_place.attach_joint_path)
-        return candidate_box_path
+        attach_box(nearest_box, pick_place.wrist_link_path, pick_place.attach_joint_path)
+        return nearest_path
 
     if not suction and currently_holding:
         detach_box(pick_place.attach_joint_path)

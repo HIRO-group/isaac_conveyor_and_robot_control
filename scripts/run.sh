@@ -15,10 +15,12 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Cheap pre-flight check - catches a missing dependency immediately instead
 # of paying a full Isaac Sim startup first (cameras.zenoh_publisher's own
 # SystemExit is the second line of defense, in case this is bypassed).
-if ! /home/ubuntu/IsaacSim/python.sh -c "import zenoh" >/dev/null 2>&1; then
+ISAAC_PYTHON=/home/ggbrisco/isaacsim/_build/linux-x86_64/release/python.sh
+
+if ! "$ISAAC_PYTHON" -c "import zenoh" >/dev/null 2>&1; then
   echo "ERROR: eclipse-zenoh missing from Isaac Sim's python. Run: bash $REPO/scripts/setup.sh" >&2
   exit 1
 fi
 
 export PYTHONPATH="$REPO/src:/tmp/proto_gen${PYTHONPATH:+:$PYTHONPATH}"
-exec /home/ubuntu/IsaacSim/python.sh "$REPO/scripts/run_conveyor_indexing.py" "$@"
+exec "$ISAAC_PYTHON" "$REPO/scripts/run_conveyor_indexing.py" "$@"

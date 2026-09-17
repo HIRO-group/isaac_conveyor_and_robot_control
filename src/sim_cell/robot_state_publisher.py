@@ -22,7 +22,7 @@ except ImportError as exc:
     raise SystemExit(
         "eclipse-zenoh is required for robot-state publishing but is not installed "
         "in this interpreter. Install it into Isaac Sim's bundled python:\n"
-        "  /home/ubuntu/IsaacSim/python.sh -m pip install eclipse-zenoh==1.7.1\n"
+        "  /home/ggbrisco/isaacsim/_build/linux-x86_64/release/python.sh -m pip install eclipse-zenoh==1.7.1\n"
         "(or run scripts/setup.sh, which does this for you - see the "
         "top-level README's 'Setup' section)."
     ) from exc
@@ -58,16 +58,67 @@ class RobotStateZenohPublisher:
     # production equivalent (BoxState/BoxStates are sim ground truth, not
     # something a real cell's PLC would ever report).
     BOX_STATE_TOPIC = "sim/box_states"
+    # Live flange pose per arm (2026-09-09, capability-diffusion's grasp-
+    # feedback work). Same name as the MCAP channel mcap_recorder.record_
+    # tool_pose already writes, same ArmToolPose message, same source prim
+    # (pick_and_place.controller.tool_world_pose - wrist_3_link/flange, the
+    # exact point external_control's EXTERNAL_ATTACH_MAX_DISTANCE gate
+    # measures from). Until now this was recorded but never published, so
+    # an external policy could only estimate tool position by running its
+    # own forward kinematics on joint readback - which lands on tool0, a
+    # different frame from the flange, and left it unable to measure the
+    # same cup-to-box distance the attach gate uses.
+    TOOL_POSE_TOPICS: ClassVar[dict] = {1: "sim/arm/1/tool_pose", 2: "sim/arm/2/tool_pose"}
+    # The autonomous indexer's per-tick belt DECISION (2026-09-09), as a
+    # SimConveyorCommands. In external-action mode `theia/plc/state_conveyors`
+    # deliberately reports what was actually commanded externally, so a
+    # client that wants to mirror the state machine (the collectors' echo
+    # bridge) cannot read the decision from telemetry - it would be echoing
+    # its own previous command. This topic carries the decision itself.
+    AUTONOMOUS_DECISION_TOPIC = "sim/conveyor/autonomous_decision"
 
     def __init__(self) -> None:
         self._session = _open_session()
         self._arm_publishers = {arm: self._session.declare_publisher(topic) for arm, topic in self.ARM_TOPICS.items()}
         self._conveyor_publisher = self._session.declare_publisher(self.CONVEYOR_TOPIC)
         self._box_state_publisher = self._session.declare_publisher(self.BOX_STATE_TOPIC)
+        self._tool_pose_publishers = {
+            arm: self._session.declare_publisher(topic) for arm, topic in self.TOOL_POSE_TOPICS.items()
+        }
+        self._decision_publisher = self._session.declare_publisher(self.AUTONOMOUS_DECISION_TOPIC)
         logger.info(
-            "robot-state publishers ready: %s, %s, %s",
+            "robot-state publishers ready: %s, %s, %s, %s",
             list(self.ARM_TOPICS.values()), self.CONVEYOR_TOPIC, self.BOX_STATE_TOPIC,
+            list(self.TOOL_POSE_TOPICS.values()),
         )
+
+    def publish_tool_pose(self, arm: int, sim_time_s: float, position, orientation_wxyz) -> None:
+        """Live counterpart of `mcap_recorder.record_tool_pose` - identical
+        message, identical source. Published every control tick regardless
+        of control mode (the flange GeomPrim is live even when the phase
+        machine is not running)."""
+        publisher = self._tool_pose_publishers.get(arm)
+        if publisher is None:
+            logger.warning("publish_tool_pose called for unknown arm %s", arm)
+            return
+        msg = sim_state.ArmToolPose(
+            sim_time_s=sim_time_s,
+            arm=arm,
+            position=sim_state.Vec3(x=float(position[0]), y=float(position[1]), z=float(position[2])),
+            orientation=sim_state.Quat(
+                w=float(orientation_wxyz[0]),
+                x=float(orientation_wxyz[1]),
+                y=float(orientation_wxyz[2]),
+                z=float(orientation_wxyz[3]),
+            ),
+        )
+        publisher.put(msg.SerializeToString())
+
+    def publish_autonomous_decision(self, commands_msg) -> None:
+        """`commands_msg`: the `SimConveyorCommands` the line controllers filled
+        in this tick from their own state machines (before any external
+        override)."""
+        self._decision_publisher.put(commands_msg.SerializeToString())
 
     def publish_arm_state(self, arm: int, joint_degrees, holding: bool, capture_ts_us: int) -> None:
         publisher = self._arm_publishers.get(arm)
@@ -115,5 +166,8 @@ class RobotStateZenohPublisher:
             publisher.undeclare()
         self._conveyor_publisher.undeclare()
         self._box_state_publisher.undeclare()
+        for publisher in self._tool_pose_publishers.values():
+            publisher.undeclare()
+        self._decision_publisher.undeclare()
         self._session.close()
         logger.info("robot-state Zenoh session closed")

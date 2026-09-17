@@ -41,8 +41,8 @@ Run with the isolated lula PYTHONPATH (needs the compiled lula module, not
 otherwise on Isaac Sim's default path - same requirement as
 generate_ur20_xrdf.py) - no SimulationApp/Isaac Sim runtime startup required:
 
-    PYTHONPATH=/home/ubuntu/IsaacSim-source/_build/target-deps/isaac_lula_prebundle \
-    /home/ubuntu/IsaacSim/python.sh /home/ubuntu/conveyor_indexing/robot_configs/generate_ur20_spheres_lula.py
+    PYTHONPATH=/home/ggbrisco/isaacsim/_build/target-deps/isaac_lula_prebundle \
+    /home/ggbrisco/isaacsim/_build/linux-x86_64/release/python.sh /home/ggbrisco/isaac_conveyor_and_robot_control/robot_configs/generate_ur20_spheres_lula.py
 """
 
 from __future__ import annotations
@@ -54,8 +54,8 @@ import lula
 import numpy as np
 import trimesh
 
-MESH_DIR = Path("/home/ubuntu/conveyor_indexing/robot_configs/ur20/meshes")
-OUTPUT_DIR = Path("/home/ubuntu/conveyor_indexing/robot_configs/ur20/lula_spheres")
+MESH_DIR = Path("/home/ggbrisco/isaac_conveyor_and_robot_control/robot_configs/ur20/meshes")
+OUTPUT_DIR = Path("/home/ggbrisco/isaac_conveyor_and_robot_control/robot_configs/ur20/lula_spheres")
 
 # link name -> (collision mesh filename, num_spheres) - same mapping as
 # generate_ur20_spheres_morphit.py.

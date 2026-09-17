@@ -89,7 +89,7 @@ DEBUG. It's noisy; only turn it on when actively debugging.
 anything:
 
 ```bash
-PYTHONPATH=/tmp/proto_gen /home/ubuntu/IsaacSim/python.sh \
+PYTHONPATH=/tmp/proto_gen /home/ggbrisco/isaacsim/_build/linux-x86_64/release/python.sh \
   scripts/monitor_external_action.py
 ```
 
