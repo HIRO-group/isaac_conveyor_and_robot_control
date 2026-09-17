@@ -37,6 +37,7 @@ from foxglove import raw_image_pb2
 from google.protobuf.timestamp_pb2 import Timestamp
 
 from conveyor_indexing.protos import sim_action, telemetry
+from conveyor_indexing.topics import Topics
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,9 @@ class McapRecorder:
         run_metadata: sim_state_pb2.RunMetadata,
         rotate_period_s: float = 30.0,
         queue_maxsize: int = 2000,
+        topics: Topics | None = None,
     ) -> None:
+        self.topics = topics or Topics.from_env()
         self.output_dir = pathlib.Path(output_dir).expanduser()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.rotate_period_s = rotate_period_s
@@ -114,7 +117,7 @@ class McapRecorder:
             step=width * 3,
             data=rgb_bytes,
         )
-        self._enqueue(f"sim/camera/{serial}/color", image, sim_time_s)
+        self._enqueue(self.topics.camera_color(serial), image, sim_time_s)
 
     def record_arm_state(
         self, arm: int, sim_time_s: float, joint_positions_rad, joint_velocities_rad_s, holding: bool,
@@ -134,11 +137,11 @@ class McapRecorder:
             ),
             sim_time_us=int(sim_time_s * 1e6),
         )
-        self._enqueue(f"sim/arm/{arm}/state", msg, sim_time_s)
+        self._enqueue(self.topics.arm_state(arm), msg, sim_time_s)
 
     def record_conveyor_states(self, sim_time_s: float, state_msg: telemetry.SimConveyorStates) -> None:
         # The runner builds a fresh message every tick and never mutates it afterwards.
-        self._enqueue("sim/conveyor/state", state_msg, sim_time_s)
+        self._enqueue(self.topics.conveyor_state, state_msg, sim_time_s)
 
     def record_box_states(self, sim_time_s: float, boxes: list, truck_deliveries_count: int = 0) -> None:
         """``boxes``: list of sim_state_pb2.BoxState (built by the caller -
@@ -153,7 +156,7 @@ class McapRecorder:
         exists to resolve, see sim_state.proto's own comment on that field).
         """
         msg = sim_state_pb2.BoxStates(sim_time_s=sim_time_s, boxes=boxes, truck_deliveries_count=truck_deliveries_count)
-        self._enqueue("sim/boxes/state", msg, sim_time_s)
+        self._enqueue(self.topics.boxes_state, msg, sim_time_s)
 
     def record_box_event(
         self,
@@ -174,13 +177,13 @@ class McapRecorder:
                 w=orientation_wxyz[0], x=orientation_wxyz[1], y=orientation_wxyz[2], z=orientation_wxyz[3]
             ),
         )
-        self._enqueue("sim/boxes/events", msg, sim_time_s)
+        self._enqueue(self.topics.boxes_events, msg, sim_time_s)
 
     def record_phase_transition(self, sim_time_s: float, arm: int, from_phase: str, to_phase: str, box_id: str) -> None:
         msg = sim_state_pb2.ArmPhaseTransition(
             sim_time_s=sim_time_s, arm=arm, from_phase=from_phase, to_phase=to_phase, box_id=box_id or ""
         )
-        self._enqueue("sim/arms/phase", msg, sim_time_s)
+        self._enqueue(self.topics.arms_phase, msg, sim_time_s)
 
     def record_tool_pose(self, arm: int, sim_time_s: float, position: tuple, orientation_wxyz: tuple) -> None:
         """Arm `arm`'s tool-frame (wrist_3_link/flange) world pose this
@@ -203,7 +206,7 @@ class McapRecorder:
                 z=float(orientation_wxyz[3]),
             ),
         )
-        self._enqueue(f"sim/arm/{arm}/tool_pose", msg, sim_time_s)
+        self._enqueue(self.topics.arm_tool_pose(arm), msg, sim_time_s)
 
     def record_arm_action_command(self, arm: int, sim_time_s: float, cmd: sim_arm_action_pb2.SimArmActionCommand) -> None:
         """The externally-supplied per-tick arm command actually applied this
@@ -215,7 +218,7 @@ class McapRecorder:
         when it was actually applied to the sim, not when it was received off
         Zenoh - same convention as every other record_* method here.
         """
-        self._enqueue(f"sim/arm/{arm}/action_command", cmd, sim_time_s)
+        self._enqueue(self.topics.arm_action(arm), cmd, sim_time_s)
 
     def record_conveyor_command(self, sim_time_s: float, cmd: sim_action.SimConveyorCommands) -> None:
         """The externally-supplied conveyor command actually applied this
@@ -224,7 +227,7 @@ class McapRecorder:
         SimConveyorCommand carries no per-message seq (unlike
         SimArmActionCommand) - only sim_time_s orders these on replay.
         """
-        self._enqueue("sim/conveyor/command", cmd, sim_time_s)
+        self._enqueue(self.topics.conveyor_command, cmd, sim_time_s)
 
     # -- internal -------------------------------------------------------------
 
@@ -277,7 +280,7 @@ class McapRecorder:
         # enough to reconstruct the run it came from - see the proto's
         # RunMetadata docstring.
         self._writer.write_message(
-            "sim/run_metadata", self._run_metadata, log_time=self._file_start_ns, publish_time=self._file_start_ns
+            self.topics.run_metadata, self._run_metadata, log_time=self._file_start_ns, publish_time=self._file_start_ns
         )
 
     def _close_current_file(self) -> None:

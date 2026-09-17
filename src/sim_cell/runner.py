@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import time
 
 import numpy as np
 
@@ -246,6 +247,11 @@ def run(simulation_app) -> None:
     # loop1.step/loop2.step below.
     zones_by_node_path = {zone.node_path: zone for zone in [*cell.loop1.zones, *cell.loop2.zones]}
 
+    # sim/clock: sim time plus the recent realtime factor.
+    clock_period_s = 0.1
+    last_clock_sim_s = 0.0
+    last_clock_wall_s = time.monotonic()
+
     world = cell.world
 
     try:
@@ -364,7 +370,7 @@ def run(simulation_app) -> None:
                                 settings.CAMERA_HEIGHT,
                             )
                     # Images + state sampled in the same iteration = the synchronized
-                    # training rows theia's converter expects. Skipped while annotators
+                    # training rows the converters expect. Skipped while annotators
                     # are still warming up (partial frames) or before the first control
                     # tick has serialized conveyor state.
                     if recorder is not None and latest_plc_bytes is not None and frames.keys() == recorder.expected_serials:
@@ -629,6 +635,11 @@ def run(simulation_app) -> None:
                         held_by_arm,
                     )
                     cell.robot_state_publisher.publish_box_states(sim_time, box_states, truck_deliveries_count)
+                    if sim_time - last_clock_sim_s >= clock_period_s:
+                        wall_now = time.monotonic()
+                        realtime_factor = (sim_time - last_clock_sim_s) / max(wall_now - last_clock_wall_s, 1e-9)
+                        cell.robot_state_publisher.publish_clock(int(sim_time * 1e6), realtime_factor)
+                        last_clock_sim_s, last_clock_wall_s = sim_time, wall_now
                     # Live flange pose, both arms, every tick, any control mode -
                     # the same read the MCAP block below records, now also on
                     # the wire so an external policy can measure the exact

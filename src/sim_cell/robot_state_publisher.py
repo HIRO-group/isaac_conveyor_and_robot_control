@@ -1,62 +1,60 @@
-"""Publishes live arm, conveyor, box and tool-pose telemetry over Zenoh."""
+"""Publishes live arm, conveyor, box, tool-pose, clock and run-metadata telemetry over Zenoh."""
 
 from __future__ import annotations
 
 import logging
-import os
-from typing import ClassVar
 
+from conveyor_indexing.topics import Topics
+from conveyor_indexing.zenoh_session import open_session
 from sim_cell.protos import sim_state, telemetry
 
 logger = logging.getLogger(__name__)
 
-try:
-    import zenoh
-except ImportError as exc:
-    raise SystemExit("eclipse-zenoh is not installed in this interpreter; see scripts/setup.sh") from exc
+
+def _vec3(v) -> sim_state.Vec3:
+    return sim_state.Vec3(x=float(v[0]), y=float(v[1]), z=float(v[2]))
 
 
-def _open_session() -> zenoh.Session:
-    conf = zenoh.Config()
-    router = os.environ.get("ZENOH_ROUTER")
-    if router:
-        conf.insert_json5("connect/endpoints", f'["{router}"]')
-        logger.info("connecting to Zenoh router at %s", router)
-    else:
-        logger.warning("ZENOH_ROUTER not set; opening Zenoh session in peer-to-peer mode")
-    return zenoh.open(conf)
+def _quat(wxyz) -> sim_state.Quat:
+    return sim_state.Quat(w=float(wxyz[0]), x=float(wxyz[1]), y=float(wxyz[2]), z=float(wxyz[3]))
 
 
 class RobotStateZenohPublisher:
     """One Zenoh session for all live telemetry the sim emits."""
 
-    ARM_TOPICS: ClassVar[dict] = {1: "sim/arm/1/state", 2: "sim/arm/2/state"}
-    CONVEYOR_TOPIC = "sim/conveyor/state"
-    BOX_STATE_TOPIC = "sim/box_states"
-    TOOL_POSE_TOPICS: ClassVar[dict] = {1: "sim/arm/1/tool_pose", 2: "sim/arm/2/tool_pose"}
-    # The autonomous indexer's decision before any external override.
-    AUTONOMOUS_DECISION_TOPIC = "sim/conveyor/autonomous_decision"
+    def __init__(self, arms: tuple[int, ...] = (1, 2), topics: Topics | None = None) -> None:
+        self.topics = topics or Topics.from_env()
+        self._session = open_session()
+        declare = self._session.declare_publisher
+        self._arm_publishers = {arm: declare(self.topics.arm_state(arm)) for arm in arms}
+        self._tool_pose_publishers = {arm: declare(self.topics.arm_tool_pose(arm)) for arm in arms}
+        self._conveyor_publisher = declare(self.topics.conveyor_state)
+        self._box_state_publisher = declare(self.topics.boxes_state)
+        self._decision_publisher = declare(self.topics.conveyor_autonomous_decision)
+        self._clock_publisher = declare(self.topics.clock)
+        self._run_metadata_publisher = declare(self.topics.run_metadata)
+        self._run_metadata_bytes: bytes | None = None
+        self._run_metadata_queryable = self._session.declare_queryable(
+            self.topics.run_metadata, self._handle_run_metadata_query
+        )
+        logger.info("telemetry publishers ready under prefix %r for arms %s", self.topics.prefix, list(arms))
 
-    def __init__(self) -> None:
-        self._session = _open_session()
-        self._arm_publishers = {arm: self._session.declare_publisher(topic) for arm, topic in self.ARM_TOPICS.items()}
-        self._conveyor_publisher = self._session.declare_publisher(self.CONVEYOR_TOPIC)
-        self._box_state_publisher = self._session.declare_publisher(self.BOX_STATE_TOPIC)
-        self._tool_pose_publishers = {
-            arm: self._session.declare_publisher(topic) for arm, topic in self.TOOL_POSE_TOPICS.items()
-        }
-        self._decision_publisher = self._session.declare_publisher(self.AUTONOMOUS_DECISION_TOPIC)
-        logger.info("telemetry publishers ready: %s, %s", list(self.ARM_TOPICS.values()), self.CONVEYOR_TOPIC)
+    def serve_run_metadata(self, run_metadata: sim_state.RunMetadata) -> None:
+        """Latched: put once, and answer queries for late joiners."""
+        self._run_metadata_bytes = run_metadata.SerializeToString()
+        self._run_metadata_publisher.put(self._run_metadata_bytes)
+
+    def _handle_run_metadata_query(self, query) -> None:
+        if self._run_metadata_bytes is not None:
+            query.reply(self.topics.run_metadata, self._run_metadata_bytes)
+
+    def publish_clock(self, sim_time_us: int, realtime_factor: float) -> None:
+        msg = telemetry.SimClock(sim_time_us=sim_time_us, realtime_factor=realtime_factor)
+        self._clock_publisher.put(msg.SerializeToString())
 
     def publish_arm_state(
-        self,
-        arm: int,
-        joint_positions_rad,
-        joint_velocities_rad_s,
-        holding: bool,
-        tool_position,
-        tool_orientation_wxyz,
-        sim_time_us: int,
+        self, arm: int, joint_positions_rad, joint_velocities_rad_s, holding: bool,
+        tool_position, tool_orientation_wxyz, sim_time_us: int,
     ) -> None:
         publisher = self._arm_publishers.get(arm)
         if publisher is None:
@@ -67,13 +65,8 @@ class RobotStateZenohPublisher:
             joint_positions_rad=[float(v) for v in joint_positions_rad],
             joint_velocities_rad_s=[float(v) for v in joint_velocities_rad_s],
             holding=holding,
-            tool_position=sim_state.Vec3(x=float(tool_position[0]), y=float(tool_position[1]), z=float(tool_position[2])),
-            tool_orientation=sim_state.Quat(
-                w=float(tool_orientation_wxyz[0]),
-                x=float(tool_orientation_wxyz[1]),
-                y=float(tool_orientation_wxyz[2]),
-                z=float(tool_orientation_wxyz[3]),
-            ),
+            tool_position=_vec3(tool_position),
+            tool_orientation=_quat(tool_orientation_wxyz),
             sim_time_us=sim_time_us,
         )
         publisher.put(msg.SerializeToString())
@@ -84,15 +77,7 @@ class RobotStateZenohPublisher:
             logger.warning("publish_tool_pose called for unknown arm %s", arm)
             return
         msg = sim_state.ArmToolPose(
-            sim_time_s=sim_time_s,
-            arm=arm,
-            position=sim_state.Vec3(x=float(position[0]), y=float(position[1]), z=float(position[2])),
-            orientation=sim_state.Quat(
-                w=float(orientation_wxyz[0]),
-                x=float(orientation_wxyz[1]),
-                y=float(orientation_wxyz[2]),
-                z=float(orientation_wxyz[3]),
-            ),
+            sim_time_s=sim_time_s, arm=arm, position=_vec3(position), orientation=_quat(orientation_wxyz)
         )
         publisher.put(msg.SerializeToString())
 
@@ -107,12 +92,16 @@ class RobotStateZenohPublisher:
         self._box_state_publisher.put(msg.SerializeToString())
 
     def close(self) -> None:
-        for publisher in self._arm_publishers.values():
+        self._run_metadata_queryable.undeclare()
+        for publisher in (
+            *self._arm_publishers.values(),
+            *self._tool_pose_publishers.values(),
+            self._conveyor_publisher,
+            self._box_state_publisher,
+            self._decision_publisher,
+            self._clock_publisher,
+            self._run_metadata_publisher,
+        ):
             publisher.undeclare()
-        self._conveyor_publisher.undeclare()
-        self._box_state_publisher.undeclare()
-        for publisher in self._tool_pose_publishers.values():
-            publisher.undeclare()
-        self._decision_publisher.undeclare()
         self._session.close()
         logger.info("telemetry Zenoh session closed")

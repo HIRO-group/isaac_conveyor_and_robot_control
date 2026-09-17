@@ -37,8 +37,8 @@ import threading
 import time
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-GCLOUD = "/snap/bin/gcloud"  # absolute: nohup/cron environments may lack /snap/bin on PATH
-DEFAULT_GCS_PREFIX = "gs://por-theia-1/data_collection/sim"
+GCLOUD = os.environ.get("GCLOUD", "gcloud")
+DEFAULT_GCS_PREFIX = os.environ.get("SIM_GCS_PREFIX")  # e.g. gs://bucket/data_collection/sim
 SWEEP_INTERVAL_S = 15.0
 DISK_WARN_PCT = 80.0
 DISK_ABORT_PCT = 90.0
@@ -268,7 +268,8 @@ def main() -> int:
     parser.add_argument("--keep-local", action="store_true", help="upload but never delete local mcap files")
     parser.add_argument("--no-upload", action="store_true", help="record locally only")
     parser.add_argument("--sweep-only", action="store_true", help="no sim: upload leftovers from --data-dir/--run-id")
-    parser.add_argument("--gcs-prefix", default=DEFAULT_GCS_PREFIX)
+    parser.add_argument("--gcs-prefix", default=DEFAULT_GCS_PREFIX, required=DEFAULT_GCS_PREFIX is None,
+                        help="gs:// prefix for uploads (default: $SIM_GCS_PREFIX)")
     parser.add_argument("--data-dir", type=pathlib.Path, default=None, help="default: <repo>/data/collect/<run_id>")
     args = parser.parse_args()
 

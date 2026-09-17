@@ -201,7 +201,7 @@ def test_build_pool_variant_proto():
 
 class _FakeCameraSpec:
     """Minimal stand-in for cameras.specs.CameraSpec - only the attributes
-    _build_run_metadata actually reads, so this test doesn't need
+    build_run_metadata actually reads, so this test doesn't need
     cameras.specs (itself Isaac-free, but keeping this test's fixture
     self-contained and explicit about the contract).
     """
@@ -248,13 +248,13 @@ def _make_extras() -> recording.RunMetadataExtras:
     )
 
 
-def test_build_run_metadata_includes_p4_fields(monkeypatch):
+def testbuild_run_metadata_includes_p4_fields(monkeypatch):
     monkeypatch.delenv(recording.CONTROL_SOURCE_ENV_VAR, raising=False)
     monkeypatch.delenv(recording._EXTERNAL_ACTION_ENV_VAR, raising=False)
     monkeypatch.delenv(recording.RUN_LABEL_ENV_VAR, raising=False)
 
     camera_specs = [_FakeCameraSpec("SIM1-PICK", 1)]
-    metadata = recording._build_run_metadata(camera_specs, spawn_seed=42, extras=_make_extras())
+    metadata = recording.build_run_metadata(camera_specs, spawn_seed=42, extras=_make_extras())
 
     assert metadata.control_source == "scripted"
     assert metadata.run_label == ""
@@ -273,10 +273,10 @@ def test_build_run_metadata_includes_p4_fields(monkeypatch):
     assert len(metadata.cameras) == 1
 
 
-def test_build_run_metadata_control_source_env_override(monkeypatch):
+def testbuild_run_metadata_control_source_env_override(monkeypatch):
     monkeypatch.setenv(recording.CONTROL_SOURCE_ENV_VAR, "policy:r3-line1")
     monkeypatch.setenv(recording.RUN_LABEL_ENV_VAR, "overnight-pilot")
-    metadata = recording._build_run_metadata([], spawn_seed=1, extras=_make_extras())
+    metadata = recording.build_run_metadata([], spawn_seed=1, extras=_make_extras())
     assert metadata.control_source == "policy:r3-line1"
     assert metadata.run_label == "overnight-pilot"
 
@@ -287,7 +287,7 @@ def test_run_metadata_serializes_and_parses_round_trip(monkeypatch):
     P4 additions specifically.
     """
     monkeypatch.delenv(recording.CONTROL_SOURCE_ENV_VAR, raising=False)
-    metadata = recording._build_run_metadata([], spawn_seed=7, extras=_make_extras())
+    metadata = recording.build_run_metadata([], spawn_seed=7, extras=_make_extras())
     raw = metadata.SerializeToString()
 
     import sim_state_pb2

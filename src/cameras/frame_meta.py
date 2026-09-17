@@ -1,8 +1,4 @@
-"""Per-frame metadata helpers: wall-clock microsecond timestamps (theia's
-FrameMetadata convention), a UUIDv7 generator (Python's stdlib `uuid` module
-doesn't gain `uuid7()` until 3.14 - this Isaac Sim install bundles 3.12), and
-a monotonic per-camera frame counter.
-"""
+"""Per-frame metadata helpers: epoch-microsecond timestamps, UUIDv7, per-camera frame counters."""
 
 from __future__ import annotations
 
@@ -13,7 +9,7 @@ from collections import defaultdict
 
 
 def now_us() -> int:
-    """Wall-clock epoch microseconds, matching theia's FrameMetadata convention."""
+    """Wall-clock epoch microseconds."""
     return time.time_ns() // 1_000
 
 

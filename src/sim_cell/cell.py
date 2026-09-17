@@ -27,7 +27,13 @@ from sim_cell.box_spawner import BoxSpawner
 from sim_cell.camera_layout import build_camera_specs
 from sim_cell.camera_tuning import maybe_enable_camera_tuning
 from sim_cell.external_command_bridge import ExternalCommandBridge
-from sim_cell.recording import PoolVariantInput, RunMetadataExtras, maybe_build_mcap_recorder, maybe_build_recorder
+from sim_cell.recording import (
+    PoolVariantInput,
+    RunMetadataExtras,
+    build_run_metadata,
+    maybe_build_mcap_recorder,
+    maybe_build_recorder,
+)
 from sim_cell.robot_placement import belt_top_z, derive_station_2_geometry, zone_geometry_inputs
 from sim_cell.robot_state_publisher import RobotStateZenohPublisher
 from sim_cell.stage_setup import StagePrep
@@ -250,7 +256,9 @@ def build_cell(stage_prep: StagePrep) -> Cell:
     # spawner.seed is only known after BoxSpawner's own construction above (see
     # its __init__) - RunMetadata needs the real seed, not the env var, since
     # an unset CONVEYOR_INDEXING_SPAWN_SEED gets a fresh random one each run.
-    mcap_recorder = maybe_build_mcap_recorder(camera_specs, spawner.seed, run_metadata_extras)
+    run_metadata = build_run_metadata(camera_specs, spawner.seed, run_metadata_extras)
+    robot_state_publisher.serve_run_metadata(run_metadata)
+    mcap_recorder = maybe_build_mcap_recorder(run_metadata)
 
     return Cell(
         world=world,

@@ -1,17 +1,11 @@
-"""Standalone verification tool for the camera rig - deliberately does not
-involve theia at all, so the camera contract (src/cameras/) can be checked
-end-to-end on its own.
+"""Standalone check of the camera rig's Zenoh contract.
 
-Connects to the same Zenoh session the sim publishes on
-(src/cameras/zenoh_publisher.py), fetches `theia/camera/list`, subscribes to
-one camera's color topic, and dumps the next frame to a PPM file (zero
-image-library dependencies) for visual inspection.
+Fetches the camera list, subscribes to one camera's color topic and dumps the
+next frame to a PPM file.
 
-Usage (run alongside `DISPLAY=:0 bash scripts/run.sh` - peer-to-peer Zenoh
-scouting connects the two without a router, matching the sim's own
-ZENOH_ROUTER-unset default):
+Usage (same PYTHONPATH as scripts/run.sh):
 
-    PYTHONPATH=/tmp/proto_gen python3 scripts/camera_probe.py [--serial SIM1-PICK] [--out FILE.ppm]
+    PYTHONPATH=src:/tmp/proto_gen python3 scripts/camera_probe.py [--serial SIM1-PICK] [--out FILE.ppm]
 
 Requires `eclipse-zenoh` (see scripts/setup.sh) and the generated
 `sim_camera_pb2` bindings on PYTHONPATH (see gen_proto.sh).
@@ -20,53 +14,36 @@ Requires `eclipse-zenoh` (see scripts/setup.sh) and the generated
 from __future__ import annotations
 
 import argparse
-import os
 import pathlib
 import queue
 import sys
 import time
 
 try:
-    import zenoh
-except ImportError:
-    sys.exit("eclipse-zenoh is required: pip install eclipse-zenoh==1.7.1 (see scripts/setup.sh)")
-
-try:
     import sim_camera_pb2 as camera
+    from conveyor_indexing.topics import Topics
+    from conveyor_indexing.zenoh_session import open_session
 except ImportError:
-    sys.exit(
-        "sim_camera_pb2 not importable - generate it first (bash gen_proto.sh) and put it on "
-        "PYTHONPATH, e.g.: PYTHONPATH=/tmp/proto_gen python3 scripts/camera_probe.py"
-    )
+    sys.exit("run with PYTHONPATH=src:/tmp/proto_gen after `bash gen_proto.sh` (see scripts/setup.sh)")
 
-LIST_KEY = "theia/camera/list"
+TOPICS = Topics.from_env()
+LIST_KEY = TOPICS.camera_list
 LIST_QUERY_TIMEOUT_S = 5.0
 FRAME_WAIT_TIMEOUT_S = 5.0
 
 
 def _payload_bytes(sample) -> bytes | None:
-    """Mirrors theia's own payload-extraction helper (see
-    ~/theia/data_collection/src/data_collection_vol2.py, read-only reference,
-    not imported) so this probe's success is a faithful stand-in for theia's.
-    """
     payload = getattr(sample, "payload", None)
     if payload is None:
         return None
     return payload.to_bytes() if hasattr(payload, "to_bytes") else bytes(payload)
 
 
-def _open_session() -> zenoh.Session:
-    conf = zenoh.Config()
-    router = os.environ.get("ZENOH_ROUTER")
-    if router:
-        conf.insert_json5("connect/endpoints", f'["{router}"]')
-        print(f"connecting to Zenoh router at {router}")
-    else:
-        print("ZENOH_ROUTER not set; opening in peer-to-peer mode")
-    return zenoh.open(conf)
+def _open_session():
+    return open_session()
 
 
-def fetch_camera_list(session: zenoh.Session) -> camera.CameraList:
+def fetch_camera_list(session) -> camera.CameraList:
     replies = list(session.get(LIST_KEY, timeout=LIST_QUERY_TIMEOUT_S))
     for reply in replies:
         payload = _payload_bytes(reply.ok)
@@ -88,9 +65,9 @@ def main() -> None:
         camera_list = fetch_camera_list(session)
         cameras = list(camera_list.cameras)
         if not cameras:
-            sys.exit("theia/camera/list replied with zero cameras")
+            sys.exit(f"{LIST_KEY} replied with zero cameras")
 
-        print(f"{len(cameras)} camera(s) on theia/camera/list:")
+        print(f"{len(cameras)} camera(s) on {LIST_KEY}:")
         for info in cameras:
             role_name = camera.CameraRole.Name(info.role)
             print(f"  {info.serial}: {info.width}x{info.height}@{info.fps} {info.format} role={role_name}")

@@ -1,9 +1,7 @@
 """Per-tick parquet logger for the conveyor indexing sim.
 
-Schema mirrors theia's real data collection layout (see
-``~/theia/data_collection/src/data_collection_vol2.py``): binary protobuf
-columns, written in background-thread batches so the sim control loop never
-blocks on I/O.
+Binary protobuf columns, written in background-thread batches so the sim
+control loop never blocks on I/O.
 
 Columns:
   tick                 int64    control-loop tick counter, monotonic per run

@@ -22,7 +22,7 @@ def test_publish_arm_state_round_trip():
     publisher = RobotStateZenohPublisher()
     try:
         received: queue.Queue = queue.Queue()
-        sub = publisher._session.declare_subscriber(publisher.ARM_TOPICS[1], received.put)
+        sub = publisher._session.declare_subscriber(publisher.topics.arm_state(1), received.put)
         try:
             publisher.publish_arm_state(
                 1, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6], [0.0] * 6, True, (1.0, 2.0, 3.0), (1.0, 0.0, 0.0, 0.0), 123_456
@@ -43,7 +43,7 @@ def test_publish_arm_state_distinct_time_per_call():
     publisher = RobotStateZenohPublisher()
     try:
         received: queue.Queue = queue.Queue()
-        sub = publisher._session.declare_subscriber(publisher.ARM_TOPICS[2], received.put)
+        sub = publisher._session.declare_subscriber(publisher.topics.arm_state(2), received.put)
         try:
             for t in (1_000, 2_000):
                 publisher.publish_arm_state(2, [0.0] * 6, [0.0] * 6, False, (0, 0, 0), (1, 0, 0, 0), t)

@@ -64,7 +64,7 @@ BOX_EVENT_DESPAWNED = sim_state_pb2.BoxEventType.BOX_EVENT_DESPAWNED
 EPISODE_ID_BASE_ENV_VAR = "CONVEYOR_INDEXING_EPISODE_ID_BASE"
 
 # RunMetadata.control_source / run_label - see resolve_control_source and
-# _build_run_metadata below. Both are free-form operator/launcher-set
+# build_run_metadata below. Both are free-form operator/launcher-set
 # metadata; neither has a default derived from sim state the way
 # instance_index/spawn_seed do.
 CONTROL_SOURCE_ENV_VAR = "CONVEYOR_INDEXING_CONTROL_SOURCE"
@@ -268,7 +268,7 @@ class RunMetadataExtras:
     """Everything RunMetadata's P4 geometry/config additions need, beyond
     camera_specs/spawn_seed - bundled here so sim_cell.cell (the only caller
     with live access to zones/robots/the box pool) has one object to build
-    and pass through maybe_build_mcap_recorder -> _build_run_metadata.
+    and pass through maybe_build_mcap_recorder -> build_run_metadata.
     """
 
     zone_geometry: list  # list[ZoneGeometryInput]
@@ -281,7 +281,7 @@ class RunMetadataExtras:
     camera_horizontal_aperture_mm: float
 
 
-def _build_run_metadata(camera_specs, spawn_seed: int, extras: RunMetadataExtras) -> sim_state_pb2.RunMetadata:
+def build_run_metadata(camera_specs, spawn_seed: int, extras: RunMetadataExtras) -> sim_state_pb2.RunMetadata:
     cameras = [
         sim_state_pb2.CameraStaticInfo(
             serial=spec.serial,
@@ -322,19 +322,12 @@ def _build_run_metadata(camera_specs, spawn_seed: int, extras: RunMetadataExtras
     )
 
 
-def maybe_build_mcap_recorder(camera_specs, spawn_seed: int, extras: RunMetadataExtras) -> McapRecorder | None:
-    """An McapRecorder when CONVEYOR_INDEXING_RECORD_MCAP=1, else None (default off).
-    Independent of maybe_build_recorder's CONVEYOR_INDEXING_RECORD - either,
-    both, or neither can be enabled for a given run.
-    """
+def maybe_build_mcap_recorder(run_metadata: sim_state_pb2.RunMetadata) -> McapRecorder | None:
+    """An McapRecorder when CONVEYOR_INDEXING_RECORD_MCAP=1, else None."""
     if os.environ.get(MCAP_RECORD_ENV_VAR, "0") != "1":
         return None
     logger.info("mcap recording enabled -> %s", MCAP_OUTPUT_DIR)
-    recorder = McapRecorder(
-        output_dir=MCAP_OUTPUT_DIR,
-        run_metadata=_build_run_metadata(camera_specs, spawn_seed, extras),
-    )
-    return recorder
+    return McapRecorder(output_dir=MCAP_OUTPUT_DIR, run_metadata=run_metadata)
 
 
 def build_box_states(
@@ -378,7 +371,7 @@ def build_box_states(
 class EpisodeTracker:
     """Cell-wide int64 episode key: +1 whenever either arm starts a new pick
     (WAITING -> anything edge). This is the recording's default segmentation;
-    theia-side conversion can re-segment from the recorded phase/sim-time
+    conversion can re-segment from the recorded phase/sim-time
     columns instead. Call update() every physics step so no edge is missed
     between 30Hz recorded rows.
     """

@@ -1,118 +1,58 @@
-"""Subscribes to externally-supplied per-arm action commands and conveyor
-commands over Zenoh, for CONVEYOR_INDEXING_EXTERNAL_ACTION mode (see
-sim_cell.runner) - the live counterpart of the autonomous
-pick_and_place.controller.MagicAttachPickPlace / ConveyorLineController
-control this mode bypasses.
+"""Subscribes to external arm, conveyor and box commands (CONVEYOR_INDEXING_EXTERNAL_ACTION=1).
 
-Only ever keeps the most recently received message per topic (never a
-backlog - only the newest command ever matters for a PD-drive-style control
-loop), guarded by one lock since Zenoh delivers subscriber callbacks off the
-main sim-loop thread.
-
-Arm commands are additionally guarded against out-of-order delivery by
-`SimArmActionCommand.seq` (a monotonic counter the publishing controller
-assigns) - real, confirmed bug, not hypothetical: this mode's Zenoh session
-opens peer-to-peer (no ZENOH_ROUTER configured in capability-diffusion's real
-collection runs), and under sustained real load a peer-to-peer transport can
-deliver a message late/out of order. Without this guard, "keep only latest"
-would briefly re-adopt a stale command whenever that happens, which then gets
-faithfully re-recorded under its own (already-superseded) seq value - found
-by direct inspection of a real collection's raw MCAP data: one seq value
-recorded as 4 separate, non-adjacent bursts up to ~481s apart within one
-~10-minute session. A downstream seq-based window-resolution fix
-(capability-diffusion's `mcap_convert.seq_range_log_times`) bounds the
-search window as a second line of defense, but rejecting the stale sample
-here stops the bad data from being recorded in the first place.
+Keeps only the newest message per topic. Arm commands with a stale `seq` are
+dropped: peer-to-peer Zenoh has been seen to deliver out of order under load.
 """
 
 from __future__ import annotations
 
-import logging
-import os
 import json
+import logging
 import threading
-from typing import ClassVar
 
 from conveyor_indexing.protos import sim_action
+from conveyor_indexing.topics import Topics
+from conveyor_indexing.zenoh_session import open_session, payload_bytes
 from sim_cell.protos import arm_action
 
 logger = logging.getLogger(__name__)
 
-try:
-    import zenoh
-except ImportError as exc:
-    raise SystemExit(
-        "eclipse-zenoh is required for CONVEYOR_INDEXING_EXTERNAL_ACTION mode but is not "
-        "installed in this interpreter. Install it into Isaac Sim's bundled python:\n"
-        "  /home/ggbrisco/isaacsim/_build/linux-x86_64/release/python.sh -m pip install eclipse-zenoh==1.7.1\n"
-        "(or run scripts/setup.sh, which does this for you - see the "
-        "top-level README's 'Setup' section)."
-    ) from exc
-
-
-def _open_session() -> zenoh.Session:
-    conf = zenoh.Config()
-    router = os.environ.get("ZENOH_ROUTER")
-    if router:
-        conf.insert_json5("connect/endpoints", f'["{router}"]')
-        logger.info("connecting to Zenoh router at %s", router)
-    else:
-        logger.warning("ZENOH_ROUTER not set; opening Zenoh session in peer-to-peer mode")
-    return zenoh.open(conf)
-
-
-def _payload_bytes(sample) -> bytes:
-    payload = sample.payload
-    return payload.to_bytes() if hasattr(payload, "to_bytes") else bytes(payload)
+BOX_OPS = ("auto", "clear", "spawn")
 
 
 class ExternalCommandBridge:
-    """Owns one Zenoh session subscribing to the externally-driven arm/conveyor
-    command topics. `latest()` is the only thing sim_cell.runner needs to call,
-    once per physics tick - a cheap lock+read, no Zenoh I/O on the hot path.
-    """
+    """`latest()` is the only hot-path call: a lock and a read, no Zenoh I/O."""
 
-    ARM_TOPICS: ClassVar[dict] = {1: "sim/arm/1/action_command", 2: "sim/arm/2/action_command"}
-    CONVEYOR_TOPIC = "sim/conveyor/command"
-    # Box placement commands (2026-09-10, decision trials): JSON, one object
-    # per message, queued in arrival order and drained once per tick by the
-    # runner:  {"op": "auto", "enabled": false}   pause/resume automatic waves
-    #          {"op": "clear"}                     despawn every box not held
-    #          {"op": "spawn", "x": .., "y": .., "yaw": 0.0, "variant": "..."|null}
-    # A "seq" field, if given, is echoed in the runner's log line.
-    BOX_TOPIC = "sim/boxes/command"
-
-    def __init__(self) -> None:
-        self._session = _open_session()
+    def __init__(self, arms: tuple[int, ...] = (1, 2), topics: Topics | None = None) -> None:
+        self.topics = topics or Topics.from_env()
+        self._session = open_session()
         self._lock = threading.Lock()
-        self._latest_arm: dict = {1: None, 2: None}
+        self._latest_arm: dict = {arm: None for arm in arms}
         self._latest_conveyors: sim_action.SimConveyorCommands | None = None
+        self._box_commands: list = []
 
         self._arm_subs = {
-            arm: self._session.declare_subscriber(topic, self._make_arm_handler(arm))
-            for arm, topic in self.ARM_TOPICS.items()
+            arm: self._session.declare_subscriber(self.topics.arm_action(arm), self._make_arm_handler(arm))
+            for arm in arms
         }
-        self._conveyor_sub = self._session.declare_subscriber(self.CONVEYOR_TOPIC, self._on_conveyors)
-        self._box_commands: list = []
-        self._box_sub = self._session.declare_subscriber(self.BOX_TOPIC, self._on_box_command)
-        logger.info(
-            "external-command subscribers ready: %s, %s, %s", list(self.ARM_TOPICS.values()), self.CONVEYOR_TOPIC, self.BOX_TOPIC
-        )
+        self._conveyor_sub = self._session.declare_subscriber(self.topics.conveyor_command, self._on_conveyors)
+        self._box_sub = self._session.declare_subscriber(self.topics.boxes_command, self._on_box_command)
+        logger.info("external-command subscribers ready for arms %s", list(arms))
 
     def _on_box_command(self, sample) -> None:
+        # JSON: {"op": "auto", "enabled": bool} | {"op": "clear"} | {"op": "spawn", "x", "y", "yaw", "variant"}
         try:
-            cmd = json.loads(_payload_bytes(sample).decode("utf-8"))
+            cmd = json.loads(payload_bytes(sample).decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as e:
             logger.warning("box command: bad payload (%s)", e)
             return
-        if not isinstance(cmd, dict) or cmd.get("op") not in ("auto", "clear", "spawn"):
+        if not isinstance(cmd, dict) or cmd.get("op") not in BOX_OPS:
             logger.warning("box command: unknown %r", cmd)
             return
         with self._lock:
             self._box_commands.append(cmd)
 
     def drain_box_commands(self) -> list:
-        """All box commands received since the last drain, in arrival order."""
         with self._lock:
             out, self._box_commands = self._box_commands, []
         return out
@@ -120,18 +60,11 @@ class ExternalCommandBridge:
     def _make_arm_handler(self, arm: int):
         def _on_sample(sample) -> None:
             msg = arm_action.SimArmActionCommand()
-            msg.ParseFromString(_payload_bytes(sample))
+            msg.ParseFromString(payload_bytes(sample))
             with self._lock:
                 current = self._latest_arm[arm]
-                # Reject a message whose seq isn't strictly newer than what's
-                # already cached - see module docstring. `current is None` is
-                # this arm's first-ever message, always accepted.
                 if current is not None and msg.seq <= current.seq:
-                    logger.warning(
-                        "arm %d: dropping out-of-order/duplicate command (seq=%d, current latest seq=%d) - "
-                        "see module docstring's Zenoh peer-to-peer reordering note",
-                        arm, msg.seq, current.seq,
-                    )
+                    logger.warning("arm %d: dropping out-of-order command seq=%d (have %d)", arm, msg.seq, current.seq)
                     return
                 self._latest_arm[arm] = msg
 
@@ -139,16 +72,14 @@ class ExternalCommandBridge:
 
     def _on_conveyors(self, sample) -> None:
         msg = sim_action.SimConveyorCommands()
-        msg.ParseFromString(_payload_bytes(sample))
+        msg.ParseFromString(payload_bytes(sample))
         with self._lock:
             self._latest_conveyors = msg
 
     def latest(self):
-        """Returns (arm1_cmd, arm2_cmd, conveyor_cmds) - any may be None if
-        nothing has been received yet on that topic.
-        """
+        """(arm1_cmd, arm2_cmd, conveyor_cmds); any may be None before its first message."""
         with self._lock:
-            return self._latest_arm[1], self._latest_arm[2], self._latest_conveyors
+            return self._latest_arm.get(1), self._latest_arm.get(2), self._latest_conveyors
 
     def close(self) -> None:
         for sub in self._arm_subs.values():

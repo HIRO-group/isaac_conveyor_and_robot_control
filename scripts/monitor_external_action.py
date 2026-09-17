@@ -2,7 +2,7 @@
 line every time an arm's suction (EE) toggles on/off, or a conveyor's
 commanded run/speed/direction changes, plus a periodic snapshot so a quiet
 sim isn't mistaken for a dead one. Read-only observer over the same Zenoh bus
-the sim and an external controller (e.g. theia's sim_bridge) already use - no
+the sim and an external controller already use - no
 interference with either process.
 
 Start this BEFORE the external controller, right after the sim itself is up -
@@ -13,7 +13,7 @@ transition is missed. See the top-level README's "Running a trained policy in
 closed loop" section for the full three-step order.
 
 Usage (same PYTHONPATH as scripts/run.sh):
-  PYTHONPATH=/tmp/proto_gen python3 scripts/monitor_external_action.py
+  PYTHONPATH=src:/tmp/proto_gen python3 scripts/monitor_external_action.py
 """
 
 from __future__ import annotations
@@ -25,8 +25,10 @@ import time
 import sim_arm_action_pb2
 import sim_conveyor_action_pb2
 import sim_telemetry_pb2
-import zenoh
+from conveyor_indexing.topics import Topics
+from conveyor_indexing.zenoh_session import open_session
 
+TOPICS = Topics.from_env()
 SNAPSHOT_INTERVAL_S = 5.0
 
 _lock = threading.Lock()
@@ -114,17 +116,16 @@ def _print_snapshot() -> None:
 
 
 def main() -> None:
-    conf = zenoh.Config()
-    session = zenoh.open(conf)
-    print(f"[{_ts()}] monitor: Zenoh session open (peer-to-peer), watching arm1/2 suction + all conveyor commands", flush=True)
+    session = open_session()
+    print(f"[{_ts()}] monitor: Zenoh session open, watching arm1/2 suction + all conveyor commands", flush=True)
 
     subs = [
-        session.declare_subscriber("sim/arm/1/action_command", lambda s: _on_arm_action(1, s)),
-        session.declare_subscriber("sim/arm/2/action_command", lambda s: _on_arm_action(2, s)),
-        session.declare_subscriber("sim/arm/1/state", lambda s: _on_arm_state(1, s)),
-        session.declare_subscriber("sim/arm/2/state", lambda s: _on_arm_state(2, s)),
-        session.declare_subscriber("sim/conveyor/command", _on_conveyor_command),
-        session.declare_subscriber("sim/conveyor/state", _on_conveyor_state),
+        session.declare_subscriber(TOPICS.arm_action(1), lambda s: _on_arm_action(1, s)),
+        session.declare_subscriber(TOPICS.arm_action(2), lambda s: _on_arm_action(2, s)),
+        session.declare_subscriber(TOPICS.arm_state(1), lambda s: _on_arm_state(1, s)),
+        session.declare_subscriber(TOPICS.arm_state(2), lambda s: _on_arm_state(2, s)),
+        session.declare_subscriber(TOPICS.conveyor_command, _on_conveyor_command),
+        session.declare_subscriber(TOPICS.conveyor_state, _on_conveyor_state),
     ]
 
     try:
