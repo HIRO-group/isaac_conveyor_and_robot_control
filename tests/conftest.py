@@ -45,7 +45,5 @@ if _PROTO_GEN_DIR.is_dir():
 else:
     raise RuntimeError(
         f"generated protobuf bindings not found at {_PROTO_GEN_DIR} - run `bash gen_proto.sh` first "
-        "(see the top-level README's 'Setup' section), or set CONVEYOR_INDEXING_PROTO_GEN_DIR to "
-        "wherever you generated them. Note gen_proto.sh's THEIA_ROOT assumes a sibling ~/theia "
-        "checkout at /home/ubuntu/theia - override that path in your own environment if it differs."
+        "(see the README), or set CONVEYOR_INDEXING_PROTO_GEN_DIR to wherever you generated them."
     )

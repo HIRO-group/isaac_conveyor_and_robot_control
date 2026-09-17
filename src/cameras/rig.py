@@ -10,10 +10,8 @@ GPU - only the final, already-RGB buffer crosses the PCIe bus to host
 memory, once per frame. Falls back to the CPU annotator path (logged once)
 if the CUDA/Torch interop isn't available in a given Isaac Sim install.
 
-`warp-lang` isn't bundled by Isaac Sim's launcher python by default - install
-it with `/home/ggbrisco/isaacsim/_build/linux-x86_64/release/python.sh -m pip install warp-lang` (also done
-by scripts/setup.sh). `to_torch` lives on the top-level `warp` module as of
-warp 1.x (there is no `warp.torch` submodule to import).
+`warp-lang` is installed by scripts/setup.sh; without it capture falls back to
+the CPU path. `to_torch` lives on the top-level `warp` module (warp 1.x).
 """
 
 from __future__ import annotations
