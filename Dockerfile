@@ -2,6 +2,7 @@
 # Isaac Sim image running this simulator headless.
 #   docker build -t conveyor-sim:<tag> --build-arg SIM_GIT_SHA=$(git rev-parse --short=12 HEAD) .
 # Run with a GPU, a scene package mounted at $SIM_SCENE_DIR and ZENOH_ROUTER set.
+# Headed by default (needs DISPLAY and the X socket); CONVEYOR_INDEXING_HEADLESS=1 for headless.
 ARG ISAAC_SIM_IMAGE=nvcr.io/nvidia/isaac-sim:6.0.1
 FROM ${ISAAC_SIM_IMAGE}
 
@@ -11,7 +12,6 @@ ENV ACCEPT_EULA=Y PRIVACY_CONSENT=Y OMNI_KIT_ALLOW_ROOT=1 \
     SIM_HOME=/opt/sim \
     PROTO_OUT=/opt/sim/proto_gen \
     PYTHONPATH=/opt/sim/src:/opt/sim/proto_gen \
-    CONVEYOR_INDEXING_HEADLESS=1 \
     CONVEYOR_INDEXING_DATA_DIR=/data \
     SIM_ASSET_DIR=/assets
 USER root

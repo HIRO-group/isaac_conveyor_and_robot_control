@@ -72,7 +72,9 @@ docker run --gpus all --rm -v /path/to/scene:/scene:ro -e SIM_SCENE_DIR=/scene \
   -e ZENOH_ROUTER=tcp/zenoh:7447 -e CONVEYOR_INDEXING_EXTERNAL_ACTION=1 conveyor-sim:local
 ```
 
-The image runs headless; its healthcheck passes once `sim/clock` is publishing.
+The image is headed by default: pass `-e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix` (after
+`xhost +local:docker`) or set `CONVEYOR_INDEXING_HEADLESS=1`. Its healthcheck passes once
+`sim/clock` is publishing.
 
 ## Zenoh contract
 
