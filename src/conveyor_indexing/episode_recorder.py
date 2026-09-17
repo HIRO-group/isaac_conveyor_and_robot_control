@@ -16,7 +16,7 @@ these columns by name (extra columns are tolerated and ignored):
   observation.images   binary   numpy.savez NPZ bytes, one CHW uint8 array per
                                 camera role key (savez uncompressed - parquet
                                 zstd below does the compression)
-  plc_state_conveyors  binary   plc_connector_pb2.StateConveyors bytes, same
+  plc_state_conveyors  binary   SimConveyorStates bytes, same
                                 message the 120Hz tick log records
 
 Extra columns for conversion-time re-segmentation and debugging:

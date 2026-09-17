@@ -1,59 +1,19 @@
-"""Episode-free MCAP recorder: the "record everything" base capture theia's
-mcap_to_lerobot.py (and future tooling) can convert from, with no episode
-concept baked in - see the top-level README's "Design" section and
-sim_cell.recording for the CONVEYOR_INDEXING_RECORD_MCAP gate.
+"""Episode-free MCAP recorder: every live channel, one background writer thread.
 
-Every message goes through one background writer thread and one bounded
-queue (drop-and-warn on overflow - the sim loop must never block on I/O,
-same contract as conveyor_indexing.episode_recorder.EpisodeRecorder), across
-two channel families:
+Channels (all generic sim schemas):
+  foxglove.RawImage     sim/camera/<id>/color     per camera frame
+  SimArmState           sim/arm/<n>/state         per control tick
+  SimConveyorStates     sim/conveyor/state        per control tick
+  BoxStates/BoxEvent    sim/boxes/state, sim/boxes/events
+  ArmPhaseTransition    sim/arms/phase            autonomous mode only
+  ArmToolPose           sim/arm/<n>/tool_pose
+  SimArmActionCommand   sim/arm/<n>/action_command   external-action mode only
+  SimConveyorCommands   sim/conveyor/command         external-action mode only
+  RunMetadata           sim/run_metadata          first message of every file
 
-  Theia-contract channels (mirror the real data-collection service's wire
-  format field-for-field, via theia's own robot.proto / foxglove/raw_image.proto
-  - see gen_proto.sh - so mcap_to_lerobot.py routes sim and real captures
-  identically by schema name):
-    foxglove.RawImage              theia/camera/<serial>/color          30Hz/camera
-    theia.robot.v1.PositionStatus  theia/robot/arm<n>/position_status   120Hz/arm
-    theia.robot.v1.MoveTarget      theia/robot/arm<n>/move_target       once/arm (see below)
-    theia.plc_connector.v1.StateConveyors  theia/plc/state_conveyors    120Hz
-
-  Sim-only ground truth (theia.sim.conveyor_indexing.v1, proto/sim_state.proto -
-  no theia equivalent; exists so a capture can fully reproduce the run, not
-  just what a real robot's sensors would see):
-    BoxStates            sim/boxes/state          120Hz (every currently-active box)
-    BoxEvent              sim/boxes/events         on spawn/despawn
-    ArmPhaseTransition    sim/arms/phase           on phase edge (skipped in external-action
-                                                    mode - see sim_cell.runner - the phase
-                                                    state machine is dormant there)
-    ArmToolPose           sim/arm/<n>/tool_pose    120Hz/arm, both control modes
-    RunMetadata           sim/run_metadata         once, and again on every rotation
-
-  On-policy action log (CONVEYOR_INDEXING_EXTERNAL_ACTION=1 only - the sim's
-  own equivalent of theia's real commanded-action log, for eval/DAgger; see
-  sim_cell.external_command_bridge for the live Zenoh topics these mirror):
-    SimArmActionCommand    sim/arm/<n>/action_command   on apply, per arm
-    SimConveyorCommands    sim/conveyor/command         on apply, once/control-tick
-
-MoveTarget is a real per-move message on theia's robot service, but this
-sim's cuMotion planner has no equivalent per-tick "target" to mirror - it
-plans whole trajectories, not waypoint commands. mcap_to_lerobot.py's replay
-gate only checks that at least one MoveTarget with a non-empty pose has ever
-been seen (`if mt.pose_target.pose: move_target_seen = True`, never reset),
-so one placeholder message per arm at recorder construction satisfies the
-gate structurally without pretending to be a real motion command - see
-_write_move_target_stub.
-
-Files rotate every ``rotate_period_s`` of sim time, named
-``<start_ns>_<end_ns>_INCOMPLETE.mcap`` while open and renamed to
-``<start_ns>_<end_ns>.mcap`` on close - the same convention (and the same
-INCOMPLETE-skip rule) theia's real data-collection service and
-mcap_to_lerobot.py already use.
-
-``log_time`` for every message is a wall-clock epoch fixed once at recorder
-construction (``run_epoch_ns``) plus the sim-time offset at record time, not
-wall-clock time of the call - so replay reflects sim rates (30Hz images,
-120Hz robot/PLC/box state) regardless of how fast or slow this process
-actually runs.
+Files rotate every `rotate_period_s` of sim time; `<start>_<end>_INCOMPLETE.mcap`
+while open, renamed on close. log_time = a fixed wall epoch + sim time, so
+replay runs at sim rates.
 """
 
 from __future__ import annotations
@@ -69,28 +29,20 @@ import time
 try:
     from mcap_protobuf.writer import Writer as McapProtobufWriter
 except ImportError as exc:  # pragma: no cover - environment dependent
-    raise SystemExit(
-        "mcap + mcap-protobuf-support are required for MCAP recording but are not installed "
-        "in this interpreter. Install them with:\n"
-        "  /home/ggbrisco/isaacsim/_build/linux-x86_64/release/python.sh -m pip install mcap mcap-protobuf-support\n"
-    ) from exc
+    raise SystemExit("mcap + mcap-protobuf-support are not installed in this interpreter; see scripts/setup.sh") from exc
 
 import sim_arm_action_pb2
 import sim_state_pb2
 from foxglove import raw_image_pb2
 from google.protobuf.timestamp_pb2 import Timestamp
-from robot import robot_pb2
 
-from conveyor_indexing.protos import plc, sim_action
+from conveyor_indexing.protos import sim_action, telemetry
 
 logger = logging.getLogger(__name__)
 
 _DROP_WARNING_INTERVAL_S = 1.0
 _HELD_BY_NONE = 0
 
-# theia's real image encoding is uppercase ("RGB8", see cameras.specs.COLOR_FORMAT);
-# foxglove's own RawImage examples use lowercase - either is fine since every
-# consumer (this repo's, mcap_to_lerobot.py's) only checks "BGR" in .upper().
 _RAW_IMAGE_ENCODING = "rgb8"
 
 
@@ -152,9 +104,7 @@ class McapRecorder:
     def record_camera_frame(
         self, serial: str, role_value: int, sim_time_s: float, capture_ts_us: int, rgb_bytes: bytes, width: int, height: int
     ) -> None:
-        # frame_id = "<serial>:<CameraRole value>" (the numeric wire value, not
-        # a name) - matches theia's real data-collection service exactly, so
-        # mcap_to_lerobot.py's camera_role_from_frame_id() parses it unchanged.
+        # frame_id = "<serial>:<CameraRole value>".
         image = raw_image_pb2.RawImage(
             timestamp=_timestamp(capture_ts_us * 1000),
             frame_id=f"{serial}:{role_value}",
@@ -164,22 +114,31 @@ class McapRecorder:
             step=width * 3,
             data=rgb_bytes,
         )
-        self._enqueue(f"theia/camera/{serial}/color", image, sim_time_s)
+        self._enqueue(f"sim/camera/{serial}/color", image, sim_time_s)
 
-    def record_position_status(
-        self, arm: int, sim_time_s: float, joint_degrees: list, dio_block0: int, ref_req_id: int = 0
+    def record_arm_state(
+        self, arm: int, sim_time_s: float, joint_positions_rad, joint_velocities_rad_s, holding: bool,
+        tool_position, tool_orientation_wxyz,
     ) -> None:
-        msg = robot_pb2.PositionStatus(
-            ref_req_id=ref_req_id,
-            joint_degrees=joint_degrees,
-            dio_blocks=[dio_block0],
+        msg = telemetry.SimArmState(
+            arm=arm,
+            joint_positions_rad=[float(v) for v in joint_positions_rad],
+            joint_velocities_rad_s=[float(v) for v in joint_velocities_rad_s],
+            holding=holding,
+            tool_position=sim_state_pb2.Vec3(
+                x=float(tool_position[0]), y=float(tool_position[1]), z=float(tool_position[2])
+            ),
+            tool_orientation=sim_state_pb2.Quat(
+                w=float(tool_orientation_wxyz[0]), x=float(tool_orientation_wxyz[1]),
+                y=float(tool_orientation_wxyz[2]), z=float(tool_orientation_wxyz[3]),
+            ),
+            sim_time_us=int(sim_time_s * 1e6),
         )
-        self._enqueue(f"theia/robot/arm{arm}/position_status", msg, sim_time_s)
+        self._enqueue(f"sim/arm/{arm}/state", msg, sim_time_s)
 
-    def record_state_conveyors(self, sim_time_s: float, state_msg: plc.StateConveyors) -> None:
-        # Safe to hand off without copying: sim_cell.runner builds a fresh
-        # StateConveyors() every control tick and never mutates this one again.
-        self._enqueue("theia/plc/state_conveyors", state_msg, sim_time_s)
+    def record_conveyor_states(self, sim_time_s: float, state_msg: telemetry.SimConveyorStates) -> None:
+        # The runner builds a fresh message every tick and never mutates it afterwards.
+        self._enqueue("sim/conveyor/state", state_msg, sim_time_s)
 
     def record_box_states(self, sim_time_s: float, boxes: list, truck_deliveries_count: int = 0) -> None:
         """``boxes``: list of sim_state_pb2.BoxState (built by the caller -
@@ -266,14 +225,6 @@ class McapRecorder:
         SimArmActionCommand) - only sim_time_s orders these on replay.
         """
         self._enqueue("sim/conveyor/command", cmd, sim_time_s)
-
-    def write_move_target_stub(self, arm: int) -> None:
-        """One placeholder MoveTarget per arm - see the module docstring for
-        why this is structural (satisfies mcap_to_lerobot.py's replay gate)
-        rather than a real motion command.
-        """
-        msg = robot_pb2.MoveTarget(ref_req_id=0, pose_target=robot_pb2.PoseTarget(pose=[0.0] * 6))
-        self._enqueue(f"theia/robot/arm{arm}/move_target", msg, 0.0)
 
     # -- internal -------------------------------------------------------------
 

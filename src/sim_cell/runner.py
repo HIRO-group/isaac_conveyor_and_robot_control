@@ -11,7 +11,7 @@ import signal
 import numpy as np
 
 from cameras.frame_meta import now_us
-from conveyor_indexing.protos import plc, sim_action
+from conveyor_indexing.protos import sim_action, telemetry
 from conveyor_indexing.telemetry import resolve_override_speed_direction
 from pick_and_place import apply_suction_edge
 from sim_cell import layout, settings
@@ -34,13 +34,6 @@ from sim_cell.stage_setup.truck import (
     despawn_boxes_off_belt,
     despawn_stale_boxes,
 )
-
-# Suction on + all 8 cups on - the sim's magic attach has no per-cup
-# actuation, so this always toggles as one block (see sim_cell.recording's
-# module docstring). Matches theia's real dio_blocks[0] bit layout: 0x10000 =
-# suction, low byte = cup mask.
-_DIO_HOLDING = 0x10000 | 0xFF
-_DIO_EMPTY = 0
 
 # When set, an external controller (e.g. a trained policy, via
 # sim_cell.external_command_bridge) drives both arms + both conveyors
@@ -370,18 +363,6 @@ def run(simulation_app) -> None:
                                 settings.CAMERA_WIDTH,
                                 settings.CAMERA_HEIGHT,
                             )
-                    # Live arm-state publish, always on (like camera_publisher) regardless of
-                    # control mode. In external_action mode, MagicAttachPickPlace.holding_box is
-                    # frozen (forward() never runs) - held_box_path_1/2 are external mode's own
-                    # equivalent, tracked by apply_suction_edge above.
-                    holding_1 = held_box_path_1 is not None if external_action else cell.pick_place.holding_box
-                    holding_2 = held_box_path_2 is not None if external_action else cell.pick_place_2.holding_box
-                    cell.robot_state_publisher.publish_arm_state(
-                        1, np.degrees(cell.robot.get_dof_positions().numpy()[0]), holding_1, capture_ts_us
-                    )
-                    cell.robot_state_publisher.publish_arm_state(
-                        2, np.degrees(cell.robot2.get_dof_positions().numpy()[0]), holding_2, capture_ts_us
-                    )
                     # Images + state sampled in the same iteration = the synchronized
                     # training rows theia's converter expects. Skipped while annotators
                     # are still warming up (partial frames) or before the first control
@@ -402,6 +383,9 @@ def run(simulation_app) -> None:
                     last_camera_time = sim_time
 
                 if sim_time - last_control_time >= control_period_s:
+                    # In external-action mode the phase machine is dormant; holding comes from the suction edge.
+                    holding_1 = held_box_path_1 is not None if external_action else cell.pick_place.holding_box
+                    holding_2 = held_box_path_2 is not None if external_action else cell.pick_place_2.holding_box
                     # One batched pose read for every box, reused below by
                     # ConveyorLineController.step, despawn_boxes_in_truck, and
                     # evaluate_pick_station - instead of each of them calling
@@ -430,7 +414,7 @@ def run(simulation_app) -> None:
                         box_linear_vel = dict(zip(cell.box_paths_ordered, linear_vel.numpy()))
                         box_angular_vel = dict(zip(cell.box_paths_ordered, angular_vel.numpy()))
 
-                    state_msg = plc.StateConveyors()
+                    state_msg = telemetry.SimConveyorStates(sim_time_us=int(sim_time * 1e6))
                     commands_msg = sim_action.SimConveyorCommands()
                     cell.loop1.step(state_msg, commands_msg, box_positions)
                     cell.loop2.step(state_msg, commands_msg, box_positions)
@@ -447,10 +431,10 @@ def run(simulation_app) -> None:
                         #
                         # state_msg's items were already populated by step() from its own
                         # autonomous decision, before this override - re-point Speed at what
-                        # actually got commanded so theia/plc/state_conveyors (the "actual
+                        # actually got commanded so sim/conveyor/state (the "actual
                         # state" telemetry an external observer sees) doesn't silently report
                         # stale autonomous values while external_action owns the real belt.
-                        items_by_name = {item.Name: item for item in state_msg.Conveyors}
+                        items_by_name = {item.name: item for item in state_msg.conveyors}
                         _, _, cmd_conveyors = cell.external_command_bridge.latest()
                         if cmd_conveyors is not None:
                             for cmd in cmd_conveyors.commands:
@@ -459,7 +443,8 @@ def run(simulation_app) -> None:
                                     zone.apply_command(cmd.run, cmd.speed)
                                     item = items_by_name.get(cmd.conveyor_node_path)
                                     if item is not None:
-                                        item.Speed, item.Direction = resolve_override_speed_direction(
+                                        item.run = cmd.run
+                                        item.speed, item.direction = resolve_override_speed_direction(
                                             cmd.run, cmd.speed, cmd.direction
                                         )
                             if mcap_recorder is not None:
@@ -473,7 +458,8 @@ def run(simulation_app) -> None:
                                 zone.apply_command(False, 0)
                                 item = items_by_name.get(zone.node_path)
                                 if item is not None:
-                                    item.Speed, item.Direction = resolve_override_speed_direction(False, 0, 0)
+                                    item.run = False
+                                    item.speed, item.direction = resolve_override_speed_direction(False, 0, 0)
                     cell.robot_state_publisher.publish_conveyor_state(state_msg)
                     # Exclude any box currently held by an arm from EVERY despawn check
                     # below (truck/floor/stale) - none of the three has any way to know a
@@ -651,23 +637,23 @@ def run(simulation_app) -> None:
                     tool_pos_2, tool_quat_2 = cell.pick_place_2.tool_world_pose()
                     cell.robot_state_publisher.publish_tool_pose(1, sim_time, tool_pos_1, tool_quat_1)
                     cell.robot_state_publisher.publish_tool_pose(2, sim_time, tool_pos_2, tool_quat_2)
+                    sim_time_us = int(sim_time * 1e6)
+                    for arm, robot, holding, tool_pos, tool_quat in (
+                        (1, cell.robot, holding_1, tool_pos_1, tool_quat_1),
+                        (2, cell.robot2, holding_2, tool_pos_2, tool_quat_2),
+                    ):
+                        joint_pos = robot.get_dof_positions().numpy()[0]
+                        joint_vel = robot.get_dof_velocities().numpy()[0]
+                        cell.robot_state_publisher.publish_arm_state(
+                            arm, joint_pos, joint_vel, holding, tool_pos, tool_quat, sim_time_us
+                        )
+                        if mcap_recorder is not None:
+                            mcap_recorder.record_arm_state(arm, sim_time, joint_pos, joint_vel, holding, tool_pos, tool_quat)
 
                     if mcap_recorder is not None:
                         # Same object, not re-parsed from latest_plc_bytes - state_msg
                         # is freshly built this tick and never mutated again.
-                        mcap_recorder.record_state_conveyors(sim_time, state_msg)
-                        mcap_recorder.record_position_status(
-                            1,
-                            sim_time,
-                            list(np.degrees(cell.robot.get_dof_positions().numpy()[0])),
-                            _DIO_HOLDING if holding_1 else _DIO_EMPTY,
-                        )
-                        mcap_recorder.record_position_status(
-                            2,
-                            sim_time,
-                            list(np.degrees(cell.robot2.get_dof_positions().numpy()[0])),
-                            _DIO_HOLDING if holding_2 else _DIO_EMPTY,
-                        )
+                        mcap_recorder.record_conveyor_states(sim_time, state_msg)
                         mcap_recorder.record_box_states(sim_time, box_states, truck_deliveries_count)
                         # Independent of control mode (unlike holding_1/2 above) - the
                         # tool_prim GeomPrim tracks the arm's actual physical

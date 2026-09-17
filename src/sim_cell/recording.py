@@ -334,8 +334,6 @@ def maybe_build_mcap_recorder(camera_specs, spawn_seed: int, extras: RunMetadata
         output_dir=MCAP_OUTPUT_DIR,
         run_metadata=_build_run_metadata(camera_specs, spawn_seed, extras),
     )
-    recorder.write_move_target_stub(1)
-    recorder.write_move_target_stub(2)
     return recorder
 
 

@@ -12,10 +12,10 @@ from types import SimpleNamespace
 import pytest
 
 from conveyor_indexing import telemetry
-from conveyor_indexing.protos import plc, sim_action
+from conveyor_indexing.protos import sim_action, telemetry as tel
 from conveyor_indexing.state_machine import DIRECTION_FORWARD, DIRECTION_UNDEFINED, ZoneCommand, ZoneObservation
 
-Machine = plc.ConveyorStateMachineCode
+Machine = tel.ConveyorStateMachineCode
 
 
 def _fake_zone(node_path: str = "/World/ConveyorTrack_01/ConveyorBeltGraph/ConveyorNode", index: int = 1):
@@ -56,20 +56,22 @@ def test_append_conveyor_state_then_override_reflects_both_fields():
     reassignment sim_cell.runner performs - both Speed and Direction must
     reflect the externally-commanded values afterward, not just Speed.
     """
-    state_msg = plc.StateConveyors()
+    state_msg = tel.SimConveyorStates()
     zone = _fake_zone()
     observation = ZoneObservation(machine=Machine.CONVEYOR_STATE_MACHINE_INDUCTING, occupied=True)
     autonomous_command = ZoneCommand(run=True, speed_pct=55, direction=DIRECTION_FORWARD)
     telemetry.append_conveyor_state(state_msg, zone, observation, autonomous_command)
 
-    item = state_msg.Conveyors[0]
-    assert item.Speed == 55
-    assert item.Direction == DIRECTION_FORWARD
+    item = state_msg.conveyors[0]
+    assert item.speed == 55
+    assert item.direction == DIRECTION_FORWARD
+    assert item.run is True and item.occupied is True
+    assert item.packml == tel.PackMLState.PACKML_EXECUTE
 
     # External controller commands a slower reverse run instead.
-    item.Speed, item.Direction = telemetry.resolve_override_speed_direction(run=True, speed=20, direction=2)
-    assert item.Speed == 20
-    assert item.Direction == 2
+    item.speed, item.direction = telemetry.resolve_override_speed_direction(run=True, speed=20, direction=2)
+    assert item.speed == 20
+    assert item.direction == 2
 
 
 def test_append_conveyor_command_carries_direction():

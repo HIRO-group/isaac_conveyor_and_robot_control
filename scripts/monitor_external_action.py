@@ -12,9 +12,8 @@ after it declared its subscription. Starting this first (and confirming the
 transition is missed. See the top-level README's "Running a trained policy in
 closed loop" section for the full three-step order.
 
-Usage (same PYTHONPATH as scripts/run.sh - see that script and proto/gen_proto.sh):
-  PYTHONPATH=/tmp/proto_gen /home/ggbrisco/isaacsim/_build/linux-x86_64/release/python.sh \
-    scripts/monitor_external_action.py
+Usage (same PYTHONPATH as scripts/run.sh):
+  PYTHONPATH=/tmp/proto_gen python3 scripts/monitor_external_action.py
 """
 
 from __future__ import annotations
@@ -23,13 +22,11 @@ import datetime
 import threading
 import time
 
-import plc_connector_pb2
 import sim_arm_action_pb2
 import sim_conveyor_action_pb2
-import sim_robot_state_pb2
+import sim_telemetry_pb2
 import zenoh
 
-DIO_SUCTION_BIT = 0x10000
 SNAPSHOT_INTERVAL_S = 5.0
 
 _lock = threading.Lock()
@@ -61,9 +58,9 @@ def _on_arm_action(arm: int, sample) -> None:
 
 
 def _on_arm_state(arm: int, sample) -> None:
-    msg = sim_robot_state_pb2.PositionStatus()
+    msg = sim_telemetry_pb2.SimArmState()
     msg.ParseFromString(bytes(sample.payload))
-    holding = bool(msg.dio_blocks and (msg.dio_blocks[0] & DIO_SUCTION_BIT))
+    holding = msg.holding
     with _lock:
         prev = _state["actual_holding"][arm]
         if prev is not None and prev != holding:
@@ -89,13 +86,13 @@ def _on_conveyor_command(sample) -> None:
 
 
 def _on_conveyor_state(sample) -> None:
-    msg = plc_connector_pb2.StateConveyors()
+    msg = sim_telemetry_pb2.SimConveyorStates()
     msg.ParseFromString(bytes(sample.payload))
     with _lock:
-        for item in msg.Conveyors:
-            key = item.Name
-            machine_name = plc_connector_pb2.ConveyorStateMachineCode.Name(item.Machine)
-            cur = (machine_name, item.Speed, item.Direction)
+        for item in msg.conveyors:
+            key = item.name
+            machine_name = sim_telemetry_pb2.ConveyorStateMachineCode.Name(item.machine)
+            cur = (machine_name, item.speed, item.direction)
             _state["actual_conveyor"][key] = cur
 
 
@@ -124,10 +121,10 @@ def main() -> None:
     subs = [
         session.declare_subscriber("sim/arm/1/action_command", lambda s: _on_arm_action(1, s)),
         session.declare_subscriber("sim/arm/2/action_command", lambda s: _on_arm_action(2, s)),
-        session.declare_subscriber("theia/robot/arm1/position_status", lambda s: _on_arm_state(1, s)),
-        session.declare_subscriber("theia/robot/arm2/position_status", lambda s: _on_arm_state(2, s)),
+        session.declare_subscriber("sim/arm/1/state", lambda s: _on_arm_state(1, s)),
+        session.declare_subscriber("sim/arm/2/state", lambda s: _on_arm_state(2, s)),
         session.declare_subscriber("sim/conveyor/command", _on_conveyor_command),
-        session.declare_subscriber("theia/plc/state_conveyors", _on_conveyor_state),
+        session.declare_subscriber("sim/conveyor/state", _on_conveyor_state),
     ]
 
     try:

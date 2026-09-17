@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from conveyor_indexing.protos import plc
+from conveyor_indexing.protos import telemetry
 from pick_and_place import rank_pick_zone_hit_paths
 
-Machine = plc.ConveyorStateMachineCode
+Machine = telemetry.ConveyorStateMachineCode
 
 
 def evaluate_pick_station(zone, machine_state, box_positions: dict, robot_xy: tuple) -> tuple:

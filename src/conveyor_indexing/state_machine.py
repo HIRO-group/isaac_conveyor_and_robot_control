@@ -34,9 +34,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from conveyor_indexing.protos import plc
+from conveyor_indexing.protos import telemetry
 
-Machine = plc.ConveyorStateMachineCode
+Machine = telemetry.ConveyorStateMachineCode
 
 # Convention per ~/theia/docs/PLC/UDT.md `Conveyor_Direction`. The wire field
 # itself is a raw sint32 (see plc-connector.proto), not a proto enum.
@@ -75,7 +75,7 @@ class ZoneCommand:
 class ZoneObservation:
     """What the zone controller observed this tick, for logging."""
 
-    machine: "plc.ConveyorStateMachineCode.V"
+    machine: int
     occupied: bool
 
 
@@ -90,7 +90,7 @@ class ConveyorZoneStateMachine:
     def __init__(self, name: str, run_speed_pct: int = 100) -> None:
         self.name = name
         self._run_speed_pct = run_speed_pct
-        self._state: "plc.ConveyorStateMachineCode.V" = Machine.CONVEYOR_STATE_MACHINE_STOPPED
+        self._state: int = Machine.CONVEYOR_STATE_MACHINE_STOPPED
         self._handshake_ticks_remaining = 0
 
     def start(self) -> None:
@@ -222,7 +222,7 @@ class ConveyorZoneStateMachine:
         observation = ZoneObservation(machine=self._state, occupied=occupied)
         return observation, command
 
-    def _handle_exception_states(self) -> "plc.ConveyorStateMachineCode.V":
+    def _handle_exception_states(self) -> int:
         """Placeholder for reject/fault decision logic. Never called.
 
         Real transition conditions for WAITING_TO_REJECT, REJECT_SINGLE,

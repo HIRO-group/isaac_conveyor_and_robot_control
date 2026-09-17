@@ -8,10 +8,7 @@ blocks on I/O.
 Columns:
   tick                 int64    control-loop tick counter, monotonic per run
   sim_time_s           double   elapsed sim time in seconds
-  plc_state_conveyors  binary   plc_connector_pb2.StateConveyors bytes -
-                                one StateConveyors_ConveyorsItem per zone,
-                                same message theia's real PLC connector
-                                publishes on theia/plc/v1/state/Conveyors
+  plc_state_conveyors  binary   SimConveyorStates bytes, one entry per zone
   conveyor_commands    binary   sim_conveyor_action_pb2.SimConveyorCommands
                                 bytes - one SimConveyorCommand per zone
 
@@ -19,7 +16,7 @@ This is intentionally NOT wired to a live Zenoh session (see this
 directory's README for why) - it's a standalone parquet file, schema-
 compatible with production so it can be merged with real collected data
 later, or replayed through the same tooling (test_collected_data_parquet.py)
-once plc_connector_pb2 bindings are on PYTHONPATH.
+once the generated bindings are on PYTHONPATH.
 
 Queue is bounded and instrumented the same way conveyor_indexing.mcap_recorder.
 McapRecorder already is (drop-and-warn on overflow, persisted close-time
