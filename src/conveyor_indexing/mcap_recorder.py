@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 import queue
 import subprocess
@@ -48,6 +49,10 @@ _RAW_IMAGE_ENCODING = "rgb8"
 
 
 def git_sha(repo_root: pathlib.Path) -> str:
+    """`SIM_GIT_SHA` if set (container builds have no .git), else `git rev-parse`."""
+    from_env = os.environ.get("SIM_GIT_SHA")
+    if from_env:
+        return from_env
     try:
         return (
             subprocess.check_output(["git", "rev-parse", "--short=12", "HEAD"], cwd=str(repo_root), timeout=5)

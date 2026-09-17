@@ -45,7 +45,8 @@ cell.yaml            loops, stations, cameras, tuning (see tests/fixtures/scene/
 camera_poses.json    referenced as `camera_poses`; may be absent on a fresh cell
 ```
 
-Remote USD assets are mirrored by `scripts/download_assets.py`.
+Remote USD assets are mirrored into `SIM_ASSET_DIR` (default `~/isaac_assets`) by
+`scripts/download_assets.py`; mount that directory at `/assets` in Docker.
 
 ## What to run
 

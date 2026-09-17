@@ -13,7 +13,8 @@ from __future__ import annotations
 import os
 
 REMOTE_ASSET_ROOT = "https://omniverse-content-production.s3-us-west-2.amazonaws.com/"
-LOCAL_ASSET_ROOT = os.path.join(os.path.expanduser("~"), "isaac_assets")
+# Local mirror of the remote assets (scripts/download_assets.py).
+LOCAL_ASSET_ROOT = os.environ.get("SIM_ASSET_DIR", os.path.join(os.path.expanduser("~"), "isaac_assets"))
 
 TOP_LEVEL_URLS = [
     REMOTE_ASSET_ROOT + "Assets/Isaac/6.0/Isaac/Props/Conveyors/ConveyorBelt_A06.usd",

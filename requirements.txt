@@ -1,0 +1,9 @@
+# Runtime deps installed into Isaac Sim's python (scripts/setup.sh, Dockerfile).
+eclipse-zenoh==1.7.1
+protobuf>=6,<8
+grpcio-tools
+pyyaml
+mcap
+mcap-protobuf-support
+pyarrow
+warp-lang
