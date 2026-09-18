@@ -90,6 +90,21 @@ logger = logging.getLogger(__name__)
 _WAKE_DIAG_STATE: dict = {}
 
 
+def _apply_external_arm_command(robot, pick_place, cmd) -> None:
+    """Joint targets go straight to the PD drive (it holds the last target on its own); a tool
+    target is planned and solved by the sim itself - see MagicAttachPickPlace.drive_external_tool_target.
+    """
+    if cmd.HasField("tool_target"):
+        t = cmd.tool_target
+        pick_place.drive_external_tool_target(
+            cmd.seq,
+            np.array([t.position.x, t.position.y, t.position.z], dtype=np.float64),
+            np.array([t.orientation.w, t.orientation.x, t.orientation.y, t.orientation.z], dtype=np.float64),
+        )
+    else:
+        robot.set_dof_position_targets(positions=np.asarray(cmd.joint_targets, dtype=np.float32))
+
+
 def _wake_and_diagnose(articulation, arm: int, tick: int) -> None:
     # 2026-09-04 update: the wake_up() defensive fix was tested live (Task
     # #62) and REFUTED - the freeze reproduced even with wake_up() firing
@@ -271,9 +286,7 @@ def run(simulation_app) -> None:
                     # last-set target for free on ticks where no new command has arrived yet.
                     cmd_arm1, cmd_arm2, cmd_conveyors = cell.external_command_bridge.latest()
                     if cmd_arm1 is not None:
-                        cell.robot.set_dof_position_targets(
-                            positions=np.asarray(cmd_arm1.joint_targets, dtype=np.float32)
-                        )
+                        _apply_external_arm_command(cell.robot, cell.pick_place, cmd_arm1)
                         _wake_and_diagnose(cell.robot, 1, tick)
                         modes.held[1] = apply_suction_edge(
                             1, cell.pick_place, cell.box_rigid_prims, cmd_arm1.suction, modes.held[1], pick_box_path
@@ -282,9 +295,7 @@ def run(simulation_app) -> None:
                         if mcap_recorder is not None:
                             mcap_recorder.record_arm_action_command(1, sim_time, cmd_arm1)
                     if cmd_arm2 is not None:
-                        cell.robot2.set_dof_position_targets(
-                            positions=np.asarray(cmd_arm2.joint_targets, dtype=np.float32)
-                        )
+                        _apply_external_arm_command(cell.robot2, cell.pick_place_2, cmd_arm2)
                         _wake_and_diagnose(cell.robot2, 2, tick)
                         modes.held[2] = apply_suction_edge(
                             2, cell.pick_place_2, cell.box_rigid_prims, cmd_arm2.suction, modes.held[2],

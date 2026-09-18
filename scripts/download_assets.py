@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 
 # This script (unlike scripts/run_conveyor_indexing.py) is invoked directly,
@@ -46,27 +47,48 @@ logger.addHandler(_handler)
 logger.propagate = False
 
 
+# Textures named in MDL parameter defaults (and in material layers as plain strings) are not
+# USD asset paths, so UsdUtils.ComputeAllDependencies never lists them and RTX later warns
+# "Texture file referenced in the material parameter defaults wasn't resolved properly".
+# They are always relative to the referencing file; scan for them and fetch alongside it.
+_TEXTURE_REF = re.compile(rb"([A-Za-z0-9_./-]*textures/[A-Za-z0-9_.-]+\.(?:png|jpg|jpeg|dds|exr|hdr|tga))")
+_SCANNED_SUFFIXES = (".mdl", ".usd", ".usda", ".usdc")
+
+
+def _texture_refs(url: str, data: bytes) -> set[str]:
+    if not url.lower().endswith(_SCANNED_SUFFIXES):
+        return set()
+    base = url.rsplit("/", 1)[0]
+    return {base + "/" + ref.decode("ascii").removeprefix("./") for ref in set(_TEXTURE_REF.findall(data))}
+
+
 def _download_one(url: str, stats: dict) -> None:
     local_path = local_path_for(url)
     if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
         stats["skipped"] += 1
-        return
-    result, _version, content = omni.client.read_file(url)
-    if result != omni.client.Result.OK:
-        stats["failed"].append((url, str(result)))
-        logger.error("FAILED to fetch %s: %s", url, result)
-        return
-    data = bytes(memoryview(content))
-    os.makedirs(os.path.dirname(local_path), exist_ok=True)
-    with open(local_path, "wb") as f:
-        f.write(data)
-    stats["downloaded"] += 1
-    stats["bytes"] += len(data)
+        with open(local_path, "rb") as f:
+            data = f.read()
+    else:
+        result, _version, content = omni.client.read_file(url)
+        if result != omni.client.Result.OK:
+            stats["failed"].append((url, str(result)))
+            logger.error("FAILED to fetch %s: %s", url, result)
+            return
+        data = bytes(memoryview(content))
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        with open(local_path, "wb") as f:
+            f.write(data)
+        stats["downloaded"] += 1
+        stats["bytes"] += len(data)
+    for texture_url in sorted(_texture_refs(url, data)):
+        if texture_url not in stats["seen"]:
+            stats["seen"].add(texture_url)
+            _download_one(texture_url, stats)
 
 
 def main() -> None:
     os.makedirs(LOCAL_ASSET_ROOT, exist_ok=True)
-    stats = {"downloaded": 0, "skipped": 0, "bytes": 0, "failed": []}
+    stats = {"downloaded": 0, "skipped": 0, "bytes": 0, "failed": [], "seen": set()}
 
     for top_url in TOP_LEVEL_URLS:
         layers, assets, unresolved = UsdUtils.ComputeAllDependencies(Sdf.AssetPath(top_url))

@@ -34,6 +34,7 @@ PHASE_TICKS = {
     "LIFT_CLEAR": 600,
     "STAGE_FOR_PLACE": 600,
     "DESCEND_TO_PLACE": 1000,
+    "EXTERNAL_TOOL_TARGET": 1200,  # external-control mode: one client-commanded tool pose
 }
 
 

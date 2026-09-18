@@ -38,6 +38,12 @@ class TrajectoryDriver:
         self._t = 0.0
         self._step = 0
 
+    def reset(self) -> None:
+        """Abandon any playback in progress so the next `drive_to` plans afresh."""
+        self._trajectory = None
+        self._t = 0.0
+        self._step = 0
+
     def drive_to(
         self,
         target_position: np.ndarray | None,

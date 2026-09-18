@@ -91,6 +91,10 @@ class MagicAttachPickPlace:
         self._phase = Phase.WAITING
         self._pick_point: np.ndarray | None = None
         self._holding_box = False  # True from ATTACH until DETACH; see forward()
+        # External-control mode (see drive_external_tool_target): the command seq being
+        # driven and whether its planned trajectory has finished playing.
+        self._external_tool_seq: int | None = None
+        self._external_tool_done = False
 
     def _lift_clear_target_z(self) -> float:
         """Top-center Z the held box must reach to clear every other box still in this
@@ -193,6 +197,28 @@ class MagicAttachPickPlace:
             self._holding_box = False
             self._phase = Phase.STAGE_FOR_PLACE
 
+    def drive_external_tool_target(self, seq: int, position: np.ndarray, orientation_wxyz: np.ndarray) -> None:
+        """External-control mode: plan a collision-free trajectory to a tool pose (cuMotion IK
+        seeded at the current configuration, then the same planner the phases use) and play it
+        back one physics step per call. A new `seq` abandons the current playback and plans
+        afresh; after the trajectory finishes the PD drive holds the final configuration. An
+        unreachable target is logged once and left where the arm is.
+        """
+        if seq != self._external_tool_seq:
+            self._external_tool_seq = seq
+            self._external_tool_done = False
+            self._trajectory_driver.reset()
+        if self._external_tool_done:
+            return
+        try:
+            self._external_tool_done = self._trajectory_driver.drive_to(
+                position, "EXTERNAL_TOOL_TARGET", orientation=orientation_wxyz, use_ik_cspace_target=True
+            )
+        except RuntimeError as exc:
+            logger.warning("external tool target seq=%d unreachable: %s", seq, exc)
+            self._trajectory_driver.reset()
+            self._external_tool_done = True
+
     def reset(self) -> None:
         """Abandon the current cycle: drop a held box and return to WAITING."""
         if self._holding_box:
@@ -202,6 +228,9 @@ class MagicAttachPickPlace:
         self._box_path = None
         self._pick_point = None
         self._phase = Phase.WAITING
+        self._external_tool_seq = None
+        self._external_tool_done = False
+        self._trajectory_driver.reset()
 
     @property
     def wrist_link_path(self) -> str:

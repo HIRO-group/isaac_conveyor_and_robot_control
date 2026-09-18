@@ -90,7 +90,7 @@ All keys are under `SIM_ZENOH_PREFIX` (default `sim`); schemas are in `proto/`.
 | `sim/boxes/state` | pub | `BoxStates` |
 | `sim/clock` | pub, 10 Hz | `SimClock` |
 | `sim/run_metadata` | pub (latched + queryable) | `RunMetadata` |
-| `sim/arm/<n>/action_command` | sub | `SimArmActionCommand` (joint setpoints, suction) |
+| `sim/arm/<n>/action_command` | sub | `SimArmActionCommand` (joint setpoints, or a `tool_target` pose the sim plans to with cuMotion IK; suction) |
 | `sim/conveyor/command` | sub | `SimConveyorCommands` |
 | `sim/boxes/command` | sub | JSON `{"op": "auto"\|"clear"\|"spawn", ...}` |
 
