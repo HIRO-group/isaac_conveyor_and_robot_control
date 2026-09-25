@@ -120,6 +120,11 @@ class ModeController:
     `release` detaches an externally held box: release(arm, held_box_path) -> None.
     `block_external` returns a reason string when external mode must be refused (e.g. the
     episode recorder is on), else None.
+
+    Autonomous-mode hold-zone readiness is "the arm is WAITING", with two demonstration
+    hooks (sim_cell.faults): `hold_while_busy` keeps the zone holding through the arm's
+    cycle, and `defer_checks[arm]()` returning True vetoes readiness so the zone passes its
+    boxes downstream (the arm cannot serve what is there).
     """
 
     stations: dict
@@ -127,6 +132,8 @@ class ModeController:
     release: Callable[[int, str], None]
     mode: ControlMode = ControlMode.AUTONOMOUS
     block_external: Callable[[], str | None] = lambda: None
+    hold_while_busy: bool = False
+    defer_checks: dict = field(default_factory=dict)  # arm -> () -> bool
     held: dict = field(default_factory=dict)  # arm -> held box path in external mode
     holding: dict = field(default_factory=dict)  # arm -> bool, for hold-zone readiness
 
@@ -166,6 +173,16 @@ class ModeController:
             for _line, _zone, pick_place in self.stations.values():
                 pick_place.reset()  # drops any box mid-cycle and returns to WAITING
 
+    def _autonomous_ready_check(self, arm: int, pick_place) -> Callable[[], bool]:
+        defer = self.defer_checks.get(arm)
+
+        def ready() -> bool:
+            if defer is not None and defer():
+                return False
+            return self.hold_while_busy or pick_place.phase_name == "WAITING"
+
+        return ready
+
     def _install(self, mode: ControlMode) -> None:
         external = mode is ControlMode.EXTERNAL
         if external:
@@ -174,5 +191,5 @@ class ModeController:
             if external:
                 line.set_hold_zone_ready_check(zone_index, lambda arm=arm: not self.holding[arm])
             else:
-                line.set_hold_zone_ready_check(zone_index, lambda pp=pick_place: pp.phase_name == "WAITING")
+                line.set_hold_zone_ready_check(zone_index, self._autonomous_ready_check(arm, pick_place))
             line.apply_belt_commands = not external

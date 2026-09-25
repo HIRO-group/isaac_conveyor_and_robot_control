@@ -54,8 +54,22 @@ class MagicAttachPickPlace:
         default_joint_positions: list = UR20_DEFAULT_JOINT_POSITIONS,
         pre_place_joint_positions: list = UR20_PRE_PLACE_JOINT_POSITIONS,
         disable_obstacle_tracking: bool = False,
+        hold_fault=None,
+        reach_fault=None,
+        hesitation=None,
     ) -> None:
+        """`hold_fault` (sim_cell.faults.HoldFault, optional) realises kappa_h: it
+        decides at each attach whether this hold drops, and when. `reach_fault`
+        (sim_cell.faults.ReachFault, optional; also settable later as
+        `.reach_fault`) realises kappa_r physically: a descent that takes the
+        tool past its radius stalls, retreats and is retried. `hesitation`
+        (sim_cell.faults.Hesitation, optional) rate-limits cycles and freezes
+        descents so the arm reads as a hesitant policy."""
         self.robot = robot
+        self._hold_fault = hold_fault
+        self.reach_fault = reach_fault
+        self._hesitation = hesitation
+        self._tick = 0  # physics steps seen by forward(); the hesitation's clock
         self.place_xy = place_xy
         self.place_belt_top_z = place_belt_top_z
         self.box_rigid_prims = box_rigid_prims
@@ -90,7 +104,9 @@ class MagicAttachPickPlace:
 
         self._phase = Phase.WAITING
         self._pick_point: np.ndarray | None = None
+        self._descend_target: np.ndarray | None = None  # the pick point, or reach_fault's clip of it
         self._holding_box = False  # True from ATTACH until DETACH; see forward()
+        self._retreating = False  # a failed reach: STAGE_FOR_PICK returns to WAITING, not DESCEND
 
     def _lift_clear_target_z(self) -> float:
         """Top-center Z the held box must reach to clear every other box still in this
@@ -111,6 +127,17 @@ class MagicAttachPickPlace:
     def forward(self, pick_ready: bool, box_path: str | None) -> None:
         # Once attach_box() creates the FixedJoint, PhysX keeps the box rigidly
         # following wrist_3_link on its own - no per-tick following code needed here.
+        self._tick += 1
+
+        # kappa_h: a decided drop fires part-way through the swing to the place side.
+        if (
+            self._holding_box
+            and self._phase == Phase.STAGE_FOR_PLACE
+            and self._hold_fault is not None
+            and self._hold_fault.should_drop(self._trajectory_driver.progress)
+        ):
+            self._drop_held_box()
+            return
 
         if self._phase == Phase.WAITING:
             if pick_ready and box_path is not None:
@@ -121,10 +148,18 @@ class MagicAttachPickPlace:
                 speed = float(np.linalg.norm(linear_velocity.numpy()[0]))
                 if speed >= PICK_SETTLE_LINEAR_SPEED:
                     return
+                if self._hesitation is not None:
+                    if not self._hesitation.can_start(self._tick):
+                        return  # rate-limited: wait at the staging pose
+                    self._hesitation.start_cycle(self._tick)
                 self.box = candidate_box
                 self._box_path = box_path
                 self._box_half_height = measure_box_half_height(box_path)
                 self._pick_point = box_top_center(self.box, self._box_half_height)
+                self._descend_target = self._pick_point
+                if self.reach_fault is not None and self.reach_fault.beyond(self._pick_point):
+                    # kappa_r (reach mode "attempt"): go as far toward it as the arm reaches
+                    self._descend_target = np.array(self.reach_fault.clip(self._pick_point))
                 # Disable the box's rigid body now (not at ATTACH) - it must never be
                 # physically contactable by the approaching arm.
                 self.box.set_enabled_rigid_bodies([False])
@@ -141,17 +176,35 @@ class MagicAttachPickPlace:
         elif self._phase == Phase.STAGE_FOR_PICK:
             # Visited twice per cycle: as the staging point before DESCEND_TO_PICK, and
             # again right after ATTACH to lift the carried box back up through the same pose.
+            # After a failed reach it is the retreat, and the cycle starts over from WAITING.
             if self._trajectory_driver.drive_to(None, "STAGE_FOR_PICK", cspace_target=self._default_joint_positions):
-                self._phase = Phase.STAGE_FOR_PLACE if self._holding_box else Phase.DESCEND_TO_PICK
+                if self._retreating:
+                    self._retreating = False
+                    self._phase = Phase.WAITING
+                else:
+                    self._phase = Phase.STAGE_FOR_PLACE if self._holding_box else Phase.DESCEND_TO_PICK
 
         elif self._phase == Phase.DESCEND_TO_PICK:
-            if self._trajectory_driver.drive_to(self._pick_point, "DESCEND_TO_PICK"):
+            if self._hesitation is not None and self._hesitation.frozen(self._trajectory_driver.progress):
+                return  # holding still mid-descent; the last targets keep the arm where it is
+            finished = self._trajectory_driver.drive_to(self._descend_target, "DESCEND_TO_PICK")
+            if self.reach_fault is not None and (
+                self.reach_fault.beyond(self._tool_world_position())
+                or (finished and self._descend_target is not self._pick_point)
+            ):
+                self._stall_at_reach_limit()
+            elif finished:
                 logger.debug(
                     "DESCEND_TO_PICK end: ee_pos=%s pick_point=%s box=%s tool_z_axis_world=%s",
                     self._tool_world_position(), self._pick_point, self.box.paths,
                     local_z_axis_in_world(self._tool_prim.get_world_poses()[1].numpy()[0]),
                 )
                 self._phase = Phase.ATTACH
+
+        elif self._phase == Phase.REACH_STALL:
+            # Straining at the reach limit; then give the box up and retreat.
+            if not self.reach_fault.stalling():
+                self._abandon_reach()
 
         elif self._phase == Phase.ATTACH:
             # Gated on real proximity, not a tick count - DESCEND_TO_PICK finishing is a
@@ -161,6 +214,8 @@ class MagicAttachPickPlace:
                 attach_box(self.box, self._wrist_link_path, self._attach_joint_path)
                 self._holding_box = True
                 self._phase = Phase.LIFT_CLEAR
+                if self._hold_fault is not None and self._hold_fault.on_attach():
+                    logger.info("kappa_h: this hold of %s will drop", self._box_path)
 
         elif self._phase == Phase.LIFT_CLEAR:
             # Straight up first: the carried box isn't a tracked collision object, so this
@@ -181,7 +236,7 @@ class MagicAttachPickPlace:
             if self._trajectory_driver.drive_to(
                 self.place_position, "DESCEND_TO_PLACE", orientation=PLACE_ORIENTATION, use_ik_cspace_target=True
             ):
-                self._phase = Phase.DETACH
+                self._phase = Phase.DETACH if self._holding_box else Phase.STAGE_FOR_PLACE
 
         elif self._phase == Phase.DETACH:
             box_pos_before, _ = self.box.get_world_poses()
@@ -193,10 +248,64 @@ class MagicAttachPickPlace:
             self._holding_box = False
             self._phase = Phase.STAGE_FOR_PLACE
 
+    def _drop_held_box(self) -> None:
+        """A grip failure (kappa_h): release the box mid-swing and finish the cycle
+        empty-handed - the in-flight swing is abandoned and re-planned to the pre-place
+        pose, from which STAGE_FOR_PLACE returns to WAITING as after a place.
+        """
+        logger.info(
+            "kappa_h: dropped %s at %.0f%% of the swing", self._box_path, 100 * self._trajectory_driver.progress
+        )
+        detach_box(self._attach_joint_path)
+        self._holding_box = False
+        self._trajectory_driver.abort()
+        self._phase = Phase.STAGE_FOR_PLACE
+
+    def _stall_at_reach_limit(self) -> None:
+        """kappa_r (reach mode "attempt"): the descent has reached the arm's limit
+        short of the box. Freeze where it is - the in-flight plan is dropped and
+        the current joint positions become the targets - and strain there a moment.
+        """
+        fault = self.reach_fault
+        tool = self._tool_world_position()
+        attempt = fault.begin_stall(tool)
+        logger.info(
+            "kappa_r: attempt %d on %s stalled %.2f m from the base at z=%.2f (limit %.2f m, box at %.2f m, top z=%.2f)",
+            attempt, self._box_path, fault.last_distance_m, tool[2], fault.max_reach_m,
+            fault.distance_m(self._pick_point), self._pick_point[2],
+        )
+        self._trajectory_driver.abort()
+        self.robot.set_dof_position_targets(positions=self.robot.get_dof_positions())
+        self._phase = Phase.REACH_STALL
+
+    def _abandon_reach(self) -> None:
+        """Give the unreachable box back to the belt (its rigid body was disabled at
+        selection) and retreat to the staging pose; WAITING then selects it again,
+        so the arm keeps trying for as long as the box is there.
+        """
+        logger.info("kappa_r: giving up on %s - retreating to try again", self._box_path)
+        self.box.set_enabled_rigid_bodies([True])
+        self.box = None
+        self._box_path = None
+        self._pick_point = None
+        self._descend_target = None
+        self._retreating = True
+        self._phase = Phase.STAGE_FOR_PICK
+
     def reset(self) -> None:
         """Abandon the current cycle: drop a held box and return to WAITING."""
         if self._holding_box:
             detach_box(self._attach_joint_path)
+        elif self.box is not None and self._phase in (Phase.DESCEND_TO_PICK, Phase.REACH_STALL, Phase.ATTACH):
+            self.box.set_enabled_rigid_bodies([True])  # disabled at selection, never attached
+        if self._hold_fault is not None:
+            self._hold_fault.reset()
+        if self.reach_fault is not None:
+            self.reach_fault.reset()
+        if self._hesitation is not None:
+            self._hesitation.reset()
+        self._retreating = False
+        self._trajectory_driver.abort()
         self._holding_box = False
         self.box = None
         self._box_path = None

@@ -46,3 +46,4 @@ class Phase(IntEnum):
     STAGE_FOR_PLACE = 5
     DESCEND_TO_PLACE = 6
     DETACH = 7
+    REACH_STALL = 8  # kappa_r (reach mode "attempt"): frozen at the reach limit before retreating

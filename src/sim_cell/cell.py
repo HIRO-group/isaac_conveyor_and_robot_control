@@ -27,6 +27,7 @@ from sim_cell.box_spawner import BoxSpawner
 from sim_cell.camera_layout import build_camera_specs
 from sim_cell.camera_tuning import maybe_enable_camera_tuning
 from sim_cell.external_command_bridge import ExternalCommandBridge
+from sim_cell.faults import FaultConfig
 from sim_cell.recording import (
     PoolVariantInput,
     RunMetadataExtras,
@@ -68,10 +69,17 @@ class Cell:
     robot_2_xy: tuple
     spawner: BoxSpawner
     pool: BoxPool
+    faults: FaultConfig
+    loop1_run_speed_pct: int  # after the kappa_c cap
 
 
 def build_cell(stage_prep: StagePrep) -> Cell:
     stage = stage_prep.stage
+    faults = FaultConfig.from_env()
+    if not faults.nominal or faults.spawn_layout != "waves" or faults.hold_while_busy:
+        logger.info("capacity faults: %s", faults.describe())
+    # kappa_c: the supply line (both pick zones' feed) runs capped; the outfeed stays nominal.
+    loop1_run_speed_pct = faults.loop1_run_speed_pct(settings.LOOP1_RUN_SPEED_PCT)
     world = World(physics_dt=settings.PHYSICS_DT, rendering_dt=settings.RENDERING_DT, stage_units_in_meters=1.0)
     logger.info("World constructed, building logger + zones")
 
@@ -86,7 +94,7 @@ def build_cell(stage_prep: StagePrep) -> Cell:
         layout.EXCLUDED_STRUCTURE_ROOTS,
         hold_zone_indices=frozenset({layout.PICK_ZONE_INDEX, layout.PICK_ZONE_INDEX_2}),
         closed_loop=False,
-        run_speed_pct=settings.LOOP1_RUN_SPEED_PCT,
+        run_speed_pct=loop1_run_speed_pct,
     )
     loop2 = ConveyorLineController(
         stage,
@@ -155,7 +163,15 @@ def build_cell(stage_prep: StagePrep) -> Cell:
     # Randomizes what's on ConveyorTrack (loop1 zone 0) between training runs - see
     # sim_cell.box_spawner. Built after world.reset() since it writes through the
     # same RigidPrim tensor views as everything else here.
-    spawner = BoxSpawner(loop1.zones[0], box_rigid_prims, stage_prep.pool)
+    # The near/far demonstration layout needs to know which side of the belt
+    # robot 1 stands on; straight line, so zone 0 and the pick zone share it.
+    spawn_zone = loop1.zones[0]
+    travel = spawn_zone.world_travel_direction
+    lateral_axis = 1 if abs(travel[0]) >= abs(travel[1]) else 0
+    near_side_sign = 1.0 if settings.ROBOT_POSITION[lateral_axis] >= spawn_zone.bbox_center[lateral_axis] else -1.0
+    spawner = BoxSpawner(
+        spawn_zone, box_rigid_prims, stage_prep.pool, layout=faults.spawn_layout, near_side_sign=near_side_sign
+    )
 
     # MagicAttachPickPlace builds the cuMotion RmpFlowController, which needs a valid
     # PhysX tensor entity - must happen after world.reset().
@@ -172,6 +188,8 @@ def build_cell(stage_prep: StagePrep) -> Cell:
         extra_exclude_obstacle_paths=[layout.GROUND_PLANE_COLLISION_PATH],
         pre_place_joint_positions=UR20_PRE_PLACE_JOINT_POSITIONS_AWAY,
         disable_obstacle_tracking=settings.DISABLE_OBSTACLE_TRACKING,
+        hold_fault=faults.arm1_hold_fault(),
+        hesitation=faults.hesitation(1, world.get_physics_dt()),
     )
     pick_place_2 = MagicAttachPickPlace(
         robot=robot2,
@@ -180,6 +198,7 @@ def build_cell(stage_prep: StagePrep) -> Cell:
         place_belt_top_z=place_belt_top_z_2,
         box_rigid_prims=box_rigid_prims,
         physics_dt=world.get_physics_dt(),
+        hesitation=faults.hesitation(2, world.get_physics_dt()),
         get_pick_zone_occupant_paths=loop1.zones[layout.PICK_ZONE_INDEX_2].get_occupying_prim_paths,
         extra_exclude_obstacle_paths=[layout.GROUND_PLANE_COLLISION_PATH],
         disable_obstacle_tracking=settings.DISABLE_OBSTACLE_TRACKING,
@@ -217,7 +236,7 @@ def build_cell(stage_prep: StagePrep) -> Cell:
     run_metadata_extras = RunMetadataExtras(
         zone_geometry=(
             zone_geometry_inputs(
-                loop1.zones, ZONE_RUN_VELOCITY * settings.LOOP1_RUN_SPEED_PCT / 100.0, 1,
+                loop1.zones, ZONE_RUN_VELOCITY * loop1_run_speed_pct / 100.0, 1,
                 frozenset({layout.PICK_ZONE_INDEX, layout.PICK_ZONE_INDEX_2}),
             )
             + zone_geometry_inputs(
@@ -283,4 +302,6 @@ def build_cell(stage_prep: StagePrep) -> Cell:
         robot_2_xy=station_2.robot_position[:2],
         spawner=spawner,
         pool=stage_prep.pool,
+        faults=faults,
+        loop1_run_speed_pct=loop1_run_speed_pct,
     )

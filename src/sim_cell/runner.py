@@ -13,12 +13,14 @@ import numpy as np
 
 from cameras.frame_meta import now_us
 from conveyor_indexing.protos import sim_action, telemetry
+from conveyor_indexing.state_machine import HOLD_ZONE_STOP_FRACTION
 from conveyor_indexing.telemetry import resolve_override_speed_direction
 from pick_and_place import apply_suction_edge
 from sim_cell import layout, settings
 from sim_cell.cell import build_cell
 from sim_cell.control import ControlChannel, ControlMode, ModeController
 from sim_cell.debug import dump_tick_debug
+from sim_cell.faults import NOMINAL_MAX_REACH_M, ReachGate, pick_zone_reach_span, reach_for_kappa
 from sim_cell.pick_dispatch import evaluate_pick_station
 from sim_cell.recording import (
     BOX_EVENT_DESPAWNED,
@@ -71,6 +73,26 @@ RECORD_MCAP_CAMERAS_ENV_VAR = "CONVEYOR_INDEXING_RECORD_MCAP_CAMERAS"
 # sim_cell.robot_state_publisher / the collectors' get_live_pose_rad), so
 # dropping it would break external control outright.
 CAMERAS_ENV_VAR = "CONVEYOR_INDEXING_CAMERAS"
+
+# Pace sim time to the wall clock at this factor (1 = real time, 0.5 = half
+# speed). Unset/0 leaves the loop unthrottled, as every collection run wants.
+# For recording the viewport with a wall-clock screen recorder: the sim
+# normally runs several times faster than real time and the factor drifts
+# with rendering load, so a screen capture of an unthrottled run plays back
+# fast and unevenly. Pacing only ever sleeps; it cannot speed a slow sim up,
+# so watch the realtime-factor log line it enables.
+REALTIME_ENV_VAR = "CONVEYOR_INDEXING_REALTIME"
+# If the sim falls this far behind the wall clock (a pause, a planner stall),
+# re-anchor instead of sprinting to catch up.
+REALTIME_MAX_LAG_S = 0.5
+
+# Frame-accurate video: write the active viewport to <dir>/<run>/frame_NNNNNN.png
+# on every render, i.e. CAMERA_FPS frames per SIM second, with frames.csv
+# mapping each frame to its sim time. Encode with scripts/video/encode_frames.sh:
+# at CAMERA_FPS the clip plays at true sim speed, lower for slow motion.
+# Independent of the wall clock, so neither the realtime factor nor a
+# recorder's tick counting can distort it. Headed only (needs a viewport).
+VIEWPORT_FRAMES_ENV_VAR = "CONVEYOR_INDEXING_VIEWPORT_FRAMES_DIR"
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +181,32 @@ def run(simulation_app) -> None:
         pick_place = cell.pick_place if arm == 1 else cell.pick_place_2
         apply_suction_edge(arm, pick_place, cell.box_rigid_prims, False, held_box_path, None)
 
+    # kappa_r (sim_cell.faults): arm 1 only selects boxes within this radius, and
+    # while its zone holds nothing it can serve, the zone passes the boxes on.
+    pick_zone_1 = cell.loop1.zones[layout.PICK_ZONE_INDEX]
+    travel_1 = pick_zone_1.world_travel_direction
+    travel_axis_1 = 0 if abs(travel_1[0]) >= abs(travel_1[1]) else 1
+    reach_near, reach_far = pick_zone_reach_span(
+        pick_zone_1.bbox_center, pick_zone_1.bbox_half_extent, travel_axis_1,
+        1.0 if travel_1[travel_axis_1] > 0 else -1.0, HOLD_ZONE_STOP_FRACTION, cell.robot_xy,
+    )
+    arm1_reach_m = reach_for_kappa(cell.faults.kappa_r_arm1, reach_near, reach_far)
+    arm1_reach_gate = ReachGate()
+    if cell.faults.attempts_unreachable:
+        # Reach mode "attempt": the controller selects as if nominal (so the
+        # gate never passes a box on) and the arm stalls at the real limit.
+        arm1_max_reach_m = NOMINAL_MAX_REACH_M
+        cell.pick_place.reach_fault = cell.faults.arm1_reach_fault(arm1_reach_m, cell.robot_xy, settings.PHYSICS_DT)
+        if not cell.faults.hold_while_busy:
+            logger.warning("reach mode attempt without %s=1: the zone releases the box while arm 1 reaches for it",
+                           "CONVEYOR_INDEXING_HOLD_WHILE_BUSY")
+    else:
+        arm1_max_reach_m = arm1_reach_m
+    logger.info(
+        "arm 1 pick zone stop line spans %.2f..%.2f m from the base; kappa_r=%g (%s) -> reach %.2f m, selection reach %.2f m",
+        reach_near, reach_far, cell.faults.kappa_r_arm1, cell.faults.reach_mode, arm1_reach_m, arm1_max_reach_m,
+    )
+
     # Who drives the cell; switchable at runtime over sim/control (see sim_cell.control).
     modes = ModeController(
         stations={
@@ -169,6 +217,8 @@ def run(simulation_app) -> None:
         release=_release,
         mode=initial_mode,
         block_external=lambda: "episode recorder (CONVEYOR_INDEXING_RECORD=1) is on" if recorder is not None else None,
+        hold_while_busy=cell.faults.hold_while_busy,
+        defer_checks={1: arm1_reach_gate},
     )
     control = ControlChannel(initial_mode)
 
@@ -234,6 +284,35 @@ def run(simulation_app) -> None:
     last_clock_sim_s = 0.0
     last_clock_wall_s = time.monotonic()
 
+    realtime_target = float(os.environ.get(REALTIME_ENV_VAR, "0") or 0.0)
+    if realtime_target < 0:
+        raise SystemExit(f"{REALTIME_ENV_VAR}={realtime_target}: must be >= 0")
+    pace_sim_anchor: float | None = None  # sim time / wall time when pacing (re)started
+    pace_wall_anchor = 0.0
+    last_rtf_log_sim_s = 0.0
+    if realtime_target > 0:
+        logger.info("pacing sim time to %.2fx real time (%s)", realtime_target, REALTIME_ENV_VAR)
+
+    frames_dir = None
+    frames_viewport = None
+    frames_index = None
+    frame_count = 0
+    frames_root = os.environ.get(VIEWPORT_FRAMES_ENV_VAR, "")
+    if frames_root:
+        from omni.kit.viewport.utility import get_active_viewport
+
+        frames_viewport = get_active_viewport()
+        if frames_viewport is None:
+            raise SystemExit(f"{VIEWPORT_FRAMES_ENV_VAR} needs a viewport - run headed, not with CONVEYOR_INDEXING_HEADLESS=1")
+        frames_dir = os.path.join(frames_root, time.strftime("%Y%m%d-%H%M%S"))
+        os.makedirs(frames_dir, exist_ok=True)
+        frames_index = open(os.path.join(frames_dir, "frames.csv"), "w")
+        frames_index.write("frame,sim_time_s\n")
+        logger.info(
+            "viewport frames -> %s at %g per sim second; encode with: bash scripts/video/encode_frames.sh %s %g out.mp4",
+            frames_dir, settings.CAMERA_FPS, frames_dir, settings.CAMERA_FPS,
+        )
+
     world = cell.world
 
     try:
@@ -248,6 +327,16 @@ def run(simulation_app) -> None:
                 # this loop actually uses.
                 world.step(render=False)
                 sim_time = world.current_time
+
+                if realtime_target > 0:
+                    wall_now = time.monotonic()
+                    if pace_sim_anchor is None:
+                        pace_sim_anchor, pace_wall_anchor = sim_time, wall_now
+                    ahead_s = (sim_time - pace_sim_anchor) / realtime_target - (wall_now - pace_wall_anchor)
+                    if ahead_s > 0:
+                        time.sleep(ahead_s)
+                    elif ahead_s < -REALTIME_MAX_LAG_S:
+                        pace_sim_anchor, pace_wall_anchor = sim_time, wall_now
 
                 pending_mode = control.take_pending()
                 if pending_mode is not None and modes.apply(pending_mode):
@@ -341,6 +430,16 @@ def run(simulation_app) -> None:
                     # 120 sim-second run, 0 truck deliveries, while the sim
                     # "ran" at 2.9x realtime doing nothing). Only the GPU
                     # capture and frame publish are genuinely optional.
+                    if frames_viewport is not None:
+                        # Scheduled now, written by the viewport render inside
+                        # world.render() below, so frame N is exactly this sim time.
+                        from omni.kit.viewport.utility import capture_viewport_to_file
+
+                        capture_viewport_to_file(
+                            frames_viewport, os.path.join(frames_dir, f"frame_{frame_count:06d}.png")
+                        )
+                        frames_index.write(f"{frame_count},{sim_time:.6f}\n")
+                        frame_count += 1
                     world.render()
                     frames = cell.camera_rig.capture_all() if cameras_enabled else {}
                     for serial, rgb_bytes in frames.items():
@@ -627,6 +726,10 @@ def run(simulation_app) -> None:
                         cell.robot_state_publisher.publish_clock(int(sim_time * 1e6), realtime_factor)
                         control.publish_status(modes.mode, int(sim_time * 1e6), realtime_factor=realtime_factor)
                         last_clock_sim_s, last_clock_wall_s = sim_time, wall_now
+                        if realtime_target > 0 and sim_time - last_rtf_log_sim_s >= 5.0:
+                            logger.info("realtime factor %.2fx (target %.2fx) at sim t=%.1fs",
+                                        realtime_factor, realtime_target, sim_time)
+                            last_rtf_log_sim_s = sim_time
                     # Live flange pose, both arms, every tick, any control mode -
                     # the same read the MCAP block below records, now also on
                     # the wire so an external policy can measure the exact
@@ -671,11 +774,23 @@ def run(simulation_app) -> None:
                     # Only "ready" once the pick zone has settled into holding (IDLE +
                     # occupied); identify which box is actually there rather than assuming a fixed one.
                     pick_ready, pick_box_path = evaluate_pick_station(
-                        cell.loop1.zones[layout.PICK_ZONE_INDEX],
+                        pick_zone_1,
                         cell.loop1.machine_states[layout.PICK_ZONE_INDEX],
                         box_positions,
                         cell.robot_xy,
+                        max_reach_m=arm1_max_reach_m,
                     )
+                    # Parked at the stop line (IDLE + occupied) with nothing within reach:
+                    # veto holding so the line passes the boxes on to station 2. Not
+                    # while still inducting - a box is out of reach as it enters the zone
+                    # and only becomes servable near the stop line.
+                    unreachable = pick_ready and pick_box_path is None
+                    if unreachable and not arm1_reach_gate.unreachable:
+                        logger.info(
+                            "kappa_r: arm 1 cannot serve %s - passing on",
+                            sorted(set(pick_zone_1.get_occupying_prim_paths())),
+                        )
+                    arm1_reach_gate.unreachable = unreachable
                     pick_ready_2, pick_box_path_2 = evaluate_pick_station(
                         cell.loop1.zones[layout.PICK_ZONE_INDEX_2],
                         cell.loop1.machine_states[layout.PICK_ZONE_INDEX_2],
@@ -691,6 +806,9 @@ def run(simulation_app) -> None:
                     logger.info("world not playing (render_count=%d)", render_count)
                 world.render()
     finally:
+        if frames_index is not None:
+            frames_index.close()
+            logger.info("wrote %d viewport frame(s) to %s", frame_count, frames_dir)
         if cell.episode_recorder is not None:
             cell.episode_recorder.close()
         if cell.mcap_recorder is not None:

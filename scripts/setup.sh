@@ -5,7 +5,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-: "${ISAAC_PYTHON:?set ISAAC_PYTHON to Isaac Sim's python.sh}"
+: "${ISAAC_PYTHON:?set ISAAC_PYTHON to the Isaac Sim python.sh}"
 
 "$ISAAC_PYTHON" -m pip install -r "$REPO/requirements.txt"
 PROTOC="$ISAAC_PYTHON -m grpc_tools.protoc" bash "$REPO/gen_proto.sh"

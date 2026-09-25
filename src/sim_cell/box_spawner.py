@@ -16,6 +16,7 @@ import random
 
 from conveyor_indexing.belt_geometry import compute_belt_bounds
 from conveyor_indexing.zone import ConveyorZone
+from sim_cell.faults import NEAR_FAR_LATERAL_FRACTIONS, SPAWN_LAYOUTS, near_far_lateral_offsets
 from sim_cell.stage_setup.box_pool import BoxPool
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,13 @@ SPAWN_SLOT_CLEARANCE_M = 0.05
 # Overridable for reproducible training runs; unset -> a fresh random seed
 # each run, logged so any run can be replayed.
 SEED_ENV_VAR = "CONVEYOR_INDEXING_SPAWN_SEED"
+# Restrict spawning to the pool variants whose key contains this text, e.g.
+# "21cm" for the small box only (demonstration takes). Unset spawns every
+# variant.
+BOX_VARIANT_ENV_VAR = "CONVEYOR_INDEXING_BOX_VARIANT"
+# Stop spawning after this many automatic waves (demonstration takes that want
+# exactly one box on the line). Unset spawns whenever the zone empties.
+MAX_WAVES_ENV_VAR = "CONVEYOR_INDEXING_MAX_WAVES"
 
 
 def wave_bounds_from_env(environ=None) -> tuple[int, int]:
@@ -89,11 +97,34 @@ def grid_layout(count: int, travel_half_extent: float, lateral_half_extent: floa
 class BoxSpawner:
     """Spawns random waves of pool boxes onto one ConveyorZone whenever it empties."""
 
-    def __init__(self, zone: ConveyorZone, box_rigid_prims: dict, pool: BoxPool, seed: int | None = None) -> None:
+    def __init__(
+        self,
+        zone: ConveyorZone,
+        box_rigid_prims: dict,
+        pool: BoxPool,
+        seed: int | None = None,
+        layout: str = "waves",
+        near_side_sign: float = 1.0,
+    ) -> None:
+        """`layout` "waves" is the random wave draw; "near_far" (demonstrations,
+        see sim_cell.faults) spawns one pair per wave, one box at the robot's
+        belt edge and one at the far edge, with `near_side_sign` (+1/-1) the
+        lateral direction toward the robot; "far" spawns the far box alone."""
+        if layout not in SPAWN_LAYOUTS:
+            raise ValueError(f"spawn layout {layout!r}: expected one of {SPAWN_LAYOUTS}")
+        self._layout = layout
+        self._near_side_sign = 1.0 if near_side_sign >= 0 else -1.0
         self._zone = zone
         self._box_rigid_prims = box_rigid_prims
         self._pool = pool
         self._available = {variant: list(paths) for variant, paths in pool.paths_by_variant.items()}
+        variant_filter = os.environ.get(BOX_VARIANT_ENV_VAR, "").strip()
+        if variant_filter:
+            keep = {v: ps for v, ps in self._available.items() if variant_filter.lower() in v.lower()}
+            if not keep:
+                raise ValueError(f"{BOX_VARIANT_ENV_VAR}={variant_filter!r} matches none of {sorted(self._available)}")
+            self._available = keep
+            logger.info("box variants restricted to %s (%s=%s)", sorted(keep), BOX_VARIANT_ENV_VAR, variant_filter)
 
         belt_bounds = compute_belt_bounds(zone.belt_prim)
         self._belt_top_z = belt_bounds.belt_top_z
@@ -117,11 +148,18 @@ class BoxSpawner:
         # this run's own ceiling: a "sparse" run (1..1) asking for a 4-box
         # opening wave is not sparse for its first minute (2026-09-10).
         self.initial_wave_count = min(max(INITIAL_WAVE_COUNT, self.wave_min), self.wave_max)
-        logger.info("box spawner seed=%d (override with %s); waves of %d..%d box(es) (override with %s/%s)",
-                    seed, SEED_ENV_VAR, self.wave_min, self.wave_max, WAVE_MIN_ENV_VAR, WAVE_MAX_ENV_VAR)
+        logger.info("box spawner seed=%d (override with %s); waves of %d..%d box(es) (override with %s/%s); layout %s",
+                    seed, SEED_ENV_VAR, self.wave_min, self.wave_max, WAVE_MIN_ENV_VAR, WAVE_MAX_ENV_VAR, layout)
 
         self._empty_since: float | None = None
         self._last_spawn_time: float | None = None
+        max_waves_raw = os.environ.get(MAX_WAVES_ENV_VAR, "").strip()
+        self.max_waves: int | None = int(max_waves_raw) if max_waves_raw else None
+        if self.max_waves is not None and self.max_waves < 1:
+            raise ValueError(f"{MAX_WAVES_ENV_VAR}={max_waves_raw}: need >= 1")
+        if self.max_waves is not None:
+            logger.info("automatic waves capped at %d (%s)", self.max_waves, MAX_WAVES_ENV_VAR)
+        self.waves_spawned = 0
         # Parking is deferred to the first update() call (see its comment) rather
         # than done here in __init__.
         self._parked = False
@@ -162,7 +200,9 @@ class BoxSpawner:
         the pool so a future wave can reuse them.
         """
         for path in box_paths:
-            self._available[self._variant_of(path)].append(path)
+            variant = self._variant_of(path)
+            if variant in self._available:  # excluded variants never spawn, so never come back
+                self._available[variant].append(path)
 
     def update(self, sim_time: float, zone_occupied: bool) -> list:
         """Call once per control tick with ConveyorTrack's current occupancy.
@@ -177,6 +217,8 @@ class BoxSpawner:
             self._parked = True
 
         if not self.auto_waves:
+            return []
+        if self.max_waves is not None and self.waves_spawned >= self.max_waves:
             return []
 
         if self._last_spawn_time is None:
@@ -253,6 +295,16 @@ class BoxSpawner:
         return sum(len(paths) for paths in self._available.values())
 
     def _spawn_wave(self, sim_time: float, requested_count: int) -> list:
+        spawned = self._spawn_wave_boxes(sim_time, requested_count)
+        if spawned:
+            self.waves_spawned += 1
+        return spawned
+
+    def _spawn_wave_boxes(self, sim_time: float, requested_count: int) -> list:
+        if self._layout == "near_far":
+            return self._spawn_lateral_row(sim_time, NEAR_FAR_LATERAL_FRACTIONS, "near/far pair")
+        if self._layout == "far":
+            return self._spawn_lateral_row(sim_time, NEAR_FAR_LATERAL_FRACTIONS[1:], "far box")
         count = min(requested_count, self._total_available())
         if count < requested_count:
             logger.warning("wave shrunk from %d to %d box(es) - pool exhausted", requested_count, count)
@@ -312,6 +364,41 @@ class BoxSpawner:
         self._last_spawn_time = sim_time
         self._empty_since = None
         logger.info("spawned wave of %d box(es) at t=%.2f: %s", len(spawned), sim_time, spawned)
+        return spawned
+
+    def _spawn_lateral_row(self, sim_time: float, fractions: tuple, what: str) -> list:
+        """One box per lateral fraction (sim_cell.faults.NEAR_FAR_LATERAL_FRACTIONS:
+        a hair off the robot's belt edge, the far edge), side by side at the
+        zone centre, yaw 0, so they stop together at the pick zone's stop line.
+        The wave size request is ignored: the whole row or nothing."""
+        n = len(fractions)
+        if self._total_available() < n:
+            logger.warning("%s needs %d box(es), pool has %d - nothing spawned", what, n, self._total_available())
+            return []
+        variants = []
+        paths = []
+        for _ in range(n):
+            variant = self._rng.choice([v for v, ps in self._available.items() if ps])
+            variants.append(variant)
+            paths.append(self._available[variant].pop())
+        half_extents = [self._pool.half_extents_by_variant[v] for v in variants]
+        offsets = near_far_lateral_offsets(
+            self._bbox_half_extent[self._lateral_axis], half_extents, self._near_side_sign, LANE_CLEARANCE_M,
+            fractions=fractions,
+        )
+        spawned = []
+        for path, variant, half, offset in zip(paths, variants, half_extents, offsets):
+            position_xyz = [0.0, 0.0, 0.0]
+            position_xyz[self._travel_axis] = self._bbox_center[self._travel_axis]
+            position_xyz[self._lateral_axis] = self._bbox_center[self._lateral_axis] + offset
+            position_xyz[2] = self._belt_top_z + half[2] + SPAWN_DROP_HEIGHT_M
+            position = (position_xyz[0], position_xyz[1], position_xyz[2])
+            quat_wxyz = (1.0, 0.0, 0.0, 0.0)
+            self._place(path, position, quat_wxyz)
+            spawned.append((path, variant, position, quat_wxyz))
+        self._last_spawn_time = sim_time
+        self._empty_since = None
+        logger.info("spawned %s at t=%.2f: %s", what, sim_time, spawned)
         return spawned
 
     def _place(self, path: str, position: tuple, quat_wxyz: tuple) -> None:

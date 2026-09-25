@@ -38,6 +38,21 @@ class TrajectoryDriver:
         self._t = 0.0
         self._step = 0
 
+    @property
+    def progress(self) -> float:
+        """Fraction of the in-flight trajectory's duration played so far, in [0, 1];
+        0 when nothing is in flight."""
+        if self._trajectory is None or self._trajectory.duration <= 0.0:
+            return 0.0
+        return min(1.0, self._t / self._trajectory.duration)
+
+    def abort(self) -> None:
+        """Forget the in-flight trajectory so the next drive_to plans afresh from
+        wherever the arm is (a cycle abandoned mid-phase: a dropped box, a reset)."""
+        self._trajectory = None
+        self._t = 0.0
+        self._step = 0
+
     def drive_to(
         self,
         target_position: np.ndarray | None,

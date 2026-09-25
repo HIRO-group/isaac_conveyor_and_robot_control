@@ -61,8 +61,50 @@ Environment variables:
 - `CONVEYOR_INDEXING_RECORD=1` — 30Hz training rows to `data/recordings/`.
 - `CONVEYOR_INDEXING_RECORD_MCAP=1` — every channel to `data/mcap/`.
 - `CONVEYOR_INDEXING_DATA_DIR` — output root (default `data/`).
+- `CONVEYOR_INDEXING_VIEWPORT_FRAMES_DIR` — headed only: write the viewport to
+  PNG on every render (`camera.fps` frames per sim second) with a
+  `frames.csv` of sim times; `scripts/video/encode_frames.sh` makes the mp4.
+- `CONVEYOR_INDEXING_REALTIME=1` — pace sim time to the wall clock (any factor,
+  e.g. `0.5` for half speed), for screen-recording the viewport; the loop is
+  otherwise unthrottled and runs several times faster than real time.
 - `ZENOH_ROUTER=tcp/host:7447` — connect to a router instead of peer mode.
 - `SIM_ZENOH_PREFIX` — key prefix (default `sim`).
+
+### Capacity faults on the built-in controller
+
+The autonomous state machine can run under a degraded capacity record
+(capability-diffusion's kappas, see `src/sim_cell/faults.py`), for
+demonstrations that need no external policy:
+
+- `CONVEYOR_INDEXING_KAPPA_R_ARM1` — arm 1's reach: it only picks boxes on the
+  nearest fraction of its pick zone; boxes it cannot serve pass on to arm 2.
+- `CONVEYOR_INDEXING_REACH_MODE=attempt` — the capacity-blind contrast: arm 1
+  selects as if nominal but physically stops at the same reach, strains there,
+  retreats and tries again for as long as the box is there (needs
+  `CONVEYOR_INDEXING_HOLD_WHILE_BUSY=1` so the zone keeps the box);
+  `CONVEYOR_INDEXING_REACH_STALL_S` (default 1) is how long it strains at the
+  limit. Default `decline` is the pass-on above.
+- `CONVEYOR_INDEXING_KAPPA_H_ARM1` — arm 1's hold: the probability a grasp
+  survives; a failed hold drops the box 30–50 % of the way through the swing to
+  the place belt. `CONVEYOR_INDEXING_DROP_EVERY_HOLD=1` drops every hold.
+- `CONVEYOR_INDEXING_KAPPA_C` — loop 1 (the belts feeding both pick zones)
+  runs at this fraction of its nominal speed.
+- `CONVEYOR_INDEXING_SPAWN_LAYOUT=near_far` — every wave is one pair: a box at
+  arm 1's belt edge and one at the far edge; `far` spawns the far box alone.
+- `CONVEYOR_INDEXING_MAX_WAVES` — stop after this many automatic waves.
+- `CONVEYOR_INDEXING_HOLD_WHILE_BUSY=1` — a pick zone keeps holding its boxes
+  while its arm is mid-cycle instead of overflowing them downstream.
+- `CONVEYOR_INDEXING_FAULT_SEED` — fixes the drop decisions and the hesitations.
+- `CONVEYOR_INDEXING_PICKS_PER_MIN` / `CONVEYOR_INDEXING_HESITATIONS` — the
+  hesitant-policy imitation: each arm starts at most that many cycles a minute
+  (waiting at its staging pose in between) and freezes that many times, one to
+  three seconds each, on the way down to a box.
+
+`scripts/video/` holds one launcher per take (`kappa_r_1.0.sh`,
+`kappa_r_0.3.sh`, `kappa_r_0.3_attempt.sh`, `kappa_r_0.3_pass_on.sh`, `kappa_r_0.3_random.sh`, `hesitant_2pm.sh`, `kappa_h_0.3.sh`, `live_graph_r0.3.sh` (the learned policy through the eval harness),
+`kappa_c_0.5.sh`), hardcoded to this
+machine's Isaac python and the dual-arm scene; both are overridable with
+`ISAAC_PYTHON` and `SIM_SCENE_DIR`.
 
 ## Docker
 

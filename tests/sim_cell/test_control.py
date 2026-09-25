@@ -119,3 +119,27 @@ def test_control_channel_round_trip():
     finally:
         client.close()
         chan.close()
+
+
+def test_hold_while_busy_keeps_the_zone_holding_through_the_cycle():
+    line, pp1, pp2, bridge = FakeLine(), FakePickPlace(), FakePickPlace(), FakeBridge()
+    ModeController(
+        stations={1: (line, 1, pp1), 2: (line, 2, pp2)}, bridge=bridge, release=lambda a, p: None, hold_while_busy=True
+    )
+    pp1.phase_name = "STAGE_FOR_PLACE"
+    assert line.ready[1]() is True
+
+
+def test_defer_check_vetoes_readiness_for_its_arm_only():
+    line, pp1, pp2, bridge = FakeLine(), FakePickPlace(), FakePickPlace(), FakeBridge()
+    defer = {"v": False}
+    ctl = ModeController(
+        stations={1: (line, 1, pp1), 2: (line, 2, pp2)}, bridge=bridge, release=lambda a, p: None,
+        defer_checks={1: lambda: defer["v"]},
+    )
+    assert line.ready[1]() is True and line.ready[2]() is True
+    defer["v"] = True
+    assert line.ready[1]() is False and line.ready[2]() is True
+    # external mode ignores the veto (readiness is the external hold state there)
+    assert ctl.apply(ControlMode.EXTERNAL)
+    assert line.ready[1]() is True
