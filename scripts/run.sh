@@ -5,7 +5,7 @@
 #   DISPLAY=:0 bash scripts/run.sh
 #
 # Requires the protobuf Python bindings already generated (see gen_proto.sh)
-# at /tmp/proto_gen, and eclipse-zenoh installed into Isaac Sim's bundled
+# at ${PROTO_GEN_DIR:-/tmp/proto_gen} (generate with capability-diffusion scripts/gen_proto.py at 687f053), and eclipse-zenoh installed into Isaac Sim's bundled
 # python (required for camera publishing) - run scripts/setup.sh for both.
 # See the top-level README's "Setup" section.
 set -euo pipefail
@@ -22,5 +22,5 @@ if ! "$ISAAC_PYTHON" -c "import zenoh" >/dev/null 2>&1; then
   exit 1
 fi
 
-export PYTHONPATH="$REPO/src:/tmp/proto_gen${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$REPO/src:${PROTO_GEN_DIR:-/tmp/proto_gen}${PYTHONPATH:+:$PYTHONPATH}"
 exec "$ISAAC_PYTHON" "$REPO/scripts/run_conveyor_indexing.py" "$@"
